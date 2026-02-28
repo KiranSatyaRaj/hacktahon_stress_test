@@ -187,6 +187,17 @@
                     <canvas id="freqChart"></canvas>
                 </div>
             </div>
+
+            <!-- Performance Throughput Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3>Throughput (FLOPS)</h3>
+                    <span class="chart-badge" id="perfChartBadge">Live</span>
+                </div>
+                <div class="chart-body">
+                    <canvas id="perfChart"></canvas>
+                </div>
+            </div>
         </div>
 
         <!-- Stats Cards -->
@@ -212,8 +223,20 @@
                 <div class="stat-value" id="statCpuFreqRange">--</div>
             </div>
             <div class="stat-card">
-                <div class="stat-label">Throttle Events</div>
-                <div class="stat-value" id="statThrottleEvents">0</div>
+                <div class="stat-label">GPU Perf State</div>
+                <div class="stat-value" id="statGpuPerfState">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">GPU Throttle</div>
+                <div class="stat-value" id="statGpuThrottle" style="font-size:0.7em">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">CPU GFLOPS</div>
+                <div class="stat-value" id="statCpuGflops">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">GPU TFLOPS</div>
+                <div class="stat-value" id="statGpuTflops">--</div>
             </div>
         </div>
 

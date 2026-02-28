@@ -140,6 +140,12 @@ async def start_test():
         gpu_workload = GPUWorkload()
         gpu_workload.start()
 
+    # Give the collector references to poll throughput/FLOPS
+    collector.set_workloads(
+        cpu_workload=cpu_workload if test_config["cpu_enabled"] else None,
+        gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
+    )
+
     # Schedule auto-stop
     threading.Thread(target=_auto_stop_timer, daemon=True).start()
 
@@ -276,6 +282,12 @@ def _cli_auto_start():
     if test_config["gpu_enabled"]:
         gpu_workload = GPUWorkload()
         gpu_workload.start()
+
+    # Give the collector references to poll throughput/FLOPS
+    collector.set_workloads(
+        cpu_workload=cpu_workload if test_config["cpu_enabled"] else None,
+        gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
+    )
 
     # Schedule auto-stop
     threading.Thread(target=_auto_stop_timer, daemon=True).start()

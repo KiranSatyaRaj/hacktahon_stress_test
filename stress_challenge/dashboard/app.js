@@ -24,6 +24,8 @@ const history = {
     cpuFreq: [],
     gpuClock: [],
     ramPercent: [],
+    cpuGflops: [],
+    gpuTflops: [],
 };
 
 // Running stats
@@ -266,6 +268,56 @@ function initCharts() {
             plugins: { legend: { display: true, position: 'top' } }
         }
     });
+
+    // Performance Throughput Chart
+    charts.perf = new Chart(document.getElementById('perfChart'), {
+        type: 'line',
+        data: {
+            labels: [],
+            datasets: [
+                {
+                    label: 'CPU GFLOPS',
+                    data: [],
+                    borderColor: '#06b6d4',
+                    backgroundColor: 'rgba(6, 182, 212, 0.08)',
+                    fill: true,
+                    borderWidth: 2,
+                    yAxisID: 'y',
+                },
+                {
+                    label: 'GPU TFLOPS',
+                    data: [],
+                    borderColor: '#22c55e',
+                    backgroundColor: 'rgba(34, 197, 94, 0.08)',
+                    fill: true,
+                    borderWidth: 2,
+                    yAxisID: 'y1',
+                }
+            ]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            scales: {
+                x: commonScales.x,
+                y: {
+                    ...commonScales.y,
+                    position: 'left',
+                    title: { display: true, text: 'GFLOPS', color: '#555577' },
+                    suggestedMin: 0,
+                },
+                y1: {
+                    ...commonScales.y,
+                    position: 'right',
+                    grid: { drawOnChartArea: false },
+                    title: { display: true, text: 'TFLOPS', color: '#555577' },
+                    suggestedMin: 0,
+                }
+            },
+            plugins: { legend: { display: true, position: 'top' } }
+        }
+    });
 }
 
 // ── WebSocket ─────────────────────────────────────────────────
@@ -311,6 +363,8 @@ function handleMetricUpdate(data) {
     pushHistory('cpuFreq', data.cpu_freq_current_mhz || 0);
     pushHistory('gpuClock', data.gpu_clock_sm_mhz || 0);
     pushHistory('ramPercent', data.ram_percent || 0);
+    pushHistory('cpuGflops', data.cpu_gflops || 0);
+    pushHistory('gpuTflops', data.gpu_tflops || 0);
 
     // Update gauges
     updateGauge('cpuGaugeFill', 'cpuGaugeValue', data.cpu_avg_percent || 0, 100);
@@ -329,6 +383,7 @@ function handleMetricUpdate(data) {
     updateChart(charts.temp, history.labels, [history.cpuTemp, history.gpuTemp]);
     updateChart(charts.gpu, history.labels, [history.gpuUtil, history.gpuPower]);
     updateChart(charts.freq, history.labels, [history.cpuFreq, history.gpuClock]);
+    updateChart(charts.perf, history.labels, [history.cpuGflops, history.gpuTflops]);
 
     // Update progress
     updateProgress(elapsed, testDuration);
@@ -447,8 +502,32 @@ function updateStats(data) {
     // Throttle events (CPU temp >= 95 or freq drop > 20%)
     if (data.cpu_temp_package >= 95) {
         stats.throttleEvents++;
-        document.getElementById('statThrottleEvents').textContent = stats.throttleEvents;
-        document.getElementById('statThrottleEvents').style.color = '#ef4444';
+    }
+
+    // GPU perf state
+    const gpuPs = data.gpu_perf_state;
+    if (gpuPs !== undefined && gpuPs >= 0) {
+        const el = document.getElementById('statGpuPerfState');
+        el.textContent = 'P' + gpuPs;
+        el.style.color = gpuPs === 0 ? '#22c55e' : gpuPs <= 2 ? '#eab308' : '#ef4444';
+    }
+
+    // GPU throttle reason
+    const throttle = data.gpu_throttle_reasons || '';
+    if (throttle) {
+        const el = document.getElementById('statGpuThrottle');
+        el.textContent = throttle === 'none' ? '✓ None' : throttle;
+        el.style.color = throttle === 'none' ? '#22c55e' : '#ef4444';
+    }
+
+    // CPU GFLOPS (current)
+    if (data.cpu_gflops > 0) {
+        document.getElementById('statCpuGflops').textContent = data.cpu_gflops.toFixed(1);
+    }
+
+    // GPU TFLOPS (current)
+    if (data.gpu_tflops > 0) {
+        document.getElementById('statGpuTflops').textContent = data.gpu_tflops.toFixed(2);
     }
 }
 
@@ -571,6 +650,8 @@ async function checkStatus() {
                     pushHistory('cpuFreq', s.cpu_freq_current_mhz || 0);
                     pushHistory('gpuClock', s.gpu_clock_sm_mhz || 0);
                     pushHistory('ramPercent', s.ram_percent || 0);
+                    pushHistory('cpuGflops', s.cpu_gflops || 0);
+                    pushHistory('gpuTflops', s.gpu_tflops || 0);
                     updateStats(s);
                 });
 
@@ -578,6 +659,7 @@ async function checkStatus() {
                 updateChart(charts.temp, history.labels, [history.cpuTemp, history.gpuTemp]);
                 updateChart(charts.gpu, history.labels, [history.gpuUtil, history.gpuPower]);
                 updateChart(charts.freq, history.labels, [history.cpuFreq, history.gpuClock]);
+                updateChart(charts.perf, history.labels, [history.cpuGflops, history.gpuTflops]);
             }
         }
     } catch (e) {

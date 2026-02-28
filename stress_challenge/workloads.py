@@ -26,10 +26,13 @@ from . import config
 #  CPU WORKLOAD
 # ════════════════════════════════════════════════════════════════════════
 
-def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int):
+def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int,
+                iteration_counter: multiprocessing.Value):
     """
     Single process that performs continuous matrix multiplication.
     Each process pins to its own NumPy computation (no GIL contention).
+    Increments a shared counter every iteration so the main process can
+    compute throughput (iter/s) and GFLOPS.
     """
     size = config.CPU_MATRIX_SIZE
     rng = np.random.default_rng(seed=worker_id)
@@ -46,6 +49,10 @@ def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int):
         b = np.cos(c[:size, :size]) + 0.001
         iteration += 1
 
+        # Atomically bump the shared counter (lock-free on most platforms)
+        with iteration_counter.get_lock():
+            iteration_counter.value += 1
+
         if iteration % 5 == 0:
             if stop_event.is_set():
                 break
@@ -58,13 +65,40 @@ class CPUWorkload:
         self.num_workers = num_workers
         self._stop_event = multiprocessing.Event()
         self._processes: list[multiprocessing.Process] = []
+        # Shared iteration counter: total iterations across ALL workers
+        self._iteration_counter = multiprocessing.Value('L', 0)  # unsigned long
+        self._last_count: int = 0
+        self._last_ts: float = 0.0
+
+    @property
+    def iteration_count(self) -> int:
+        return self._iteration_counter.value
+
+    def get_throughput(self) -> float:
+        """Return current iterations/sec (aggregate across all workers)."""
+        now = time.time()
+        current = self._iteration_counter.value
+        if self._last_ts == 0.0:
+            self._last_ts = now
+            self._last_count = current
+            return 0.0
+        dt = now - self._last_ts
+        if dt < 0.5:
+            return 0.0  # too early, avoid division noise
+        rate = (current - self._last_count) / dt
+        self._last_count = current
+        self._last_ts = now
+        return rate
 
     def start(self):
         self._stop_event.clear()
+        self._iteration_counter.value = 0
+        self._last_count = 0
+        self._last_ts = 0.0
         for i in range(self.num_workers):
             p = multiprocessing.Process(
                 target=_cpu_worker,
-                args=(self._stop_event, i),
+                args=(self._stop_event, i, self._iteration_counter),
                 daemon=True,
             )
             p.start()
@@ -125,12 +159,13 @@ try:
     print(
         f"GPU_BUDGET  vram={vram_bytes} budget={budget_bytes}"
         f" ({budget_bytes/1024**3:.2f} GB)  matrix_N={N}"
-        f" ({N*N*2/1024**2:.0f} MB per FP16 matrix)",
+        f" ({N*N*2/1024**2:.0f} MB per FP16 matrix)"
+        f" B={B} M={M} K={K}",
         flush=True,
     )
 
     # Batch matmul sizing: B batches of MxK @ KxN, float16
-    B, M, K = 64, 1024, 1024
+    B, M, K = 32, 1024, 1024
 
     # ── Allocate persistent buffers (avoid per-iteration alloc overhead) ─
     # Stream 0 & 1: large 2D FP16 GEMM → hammers Tensor Cores
@@ -154,6 +189,12 @@ try:
 
     torch.cuda.synchronize()
 
+    # Iteration tracking — print "GPU_ITER <count> <elapsed>" every 2s
+    # so the parent process can compute throughput and TFLOPS
+    iters = 0
+    t_start = time.time()
+    t_last_report = t_start
+
     while keep_running:
         # Stream 0: FP16 GEMM A → hammers Tensor Cores
         with torch.cuda.stream(streams[0]):
@@ -176,6 +217,13 @@ try:
 
         # Sync once per iteration to keep all streams coordinated
         torch.cuda.synchronize()
+        iters += 1
+
+        # Report throughput every ~2 seconds
+        now = time.time()
+        if now - t_last_report >= 2.0:
+            print(f"GPU_ITER {iters} {now - t_start:.2f}", flush=True)
+            t_last_report = now
 
 except Exception as e:
     print(f"TORCH_ERROR {e}", flush=True)
@@ -324,13 +372,49 @@ class GPUWorkload:
         self._thread: threading.Thread | None = None
         self._subprocess: subprocess.Popen | None = None
         self._method = "none"
+        # Throughput tracking (parsed from subprocess stdout)
+        self._gpu_iters: int = 0
+        self._gpu_elapsed: float = 0.0
+        self._gpu_iter_rate: float = 0.0       # current iter/sec
+        self._last_iters: int = 0
+        self._last_iter_ts: float = 0.0
+        # Matrix sizes from GPU_BUDGET for TFLOPS derivation
+        self._matrix_n: int = 0
+        self._batch_b: int = 0
+        self._batch_m: int = 0
+        self._batch_k: int = 0
+        self._stdout_reader: threading.Thread | None = None
 
     @property
     def method(self) -> str:
         return self._method
 
+    @property
+    def iteration_count(self) -> int:
+        return self._gpu_iters
+
+    def get_throughput(self) -> float:
+        """Return current GPU iterations/sec."""
+        return self._gpu_iter_rate
+
+    def get_tflops(self) -> float:
+        """Derive FP16 TFLOPS from current throughput and matrix sizes."""
+        rate = self._gpu_iter_rate
+        if rate <= 0 or self._matrix_n == 0:
+            return 0.0
+        N = self._matrix_n
+        B, M, K = self._batch_b, self._batch_m, self._batch_k
+        # Per iteration: 2× NxN GEMM + 1× batched BxMxK @ BxKxM
+        ops_per_iter = 2 * (2 * N * N * N) + B * (2 * M * K * M)
+        return rate * ops_per_iter / 1e12
+
     def start(self):
         self._stop_event.clear()
+        self._gpu_iters = 0
+        self._gpu_elapsed = 0.0
+        self._gpu_iter_rate = 0.0
+        self._last_iters = 0
+        self._last_iter_ts = 0.0
         self._thread = threading.Thread(target=self._run_stress_chain, daemon=True)
         self._thread.start()
 
@@ -342,12 +426,66 @@ class GPUWorkload:
                 self._subprocess.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 self._subprocess.kill()
+        if self._stdout_reader:
+            self._stdout_reader.join(timeout=5)
         if self._thread:
             self._thread.join(timeout=15)
         # Reset GPU clocks
         try:
             subprocess.run(["nvidia-smi", "-rgc"], capture_output=True, timeout=5)
             subprocess.run(["nvidia-smi", "-rmc"], capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+    def _read_subprocess_stdout(self):
+        """
+        Background thread that reads the subprocess stdout line by line.
+        Parses GPU_ITER and GPU_BUDGET lines to update throughput tracking.
+        """
+        try:
+            for line in self._subprocess.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+
+                if line.startswith("GPU_ITER "):
+                    # Format: "GPU_ITER <total_iters> <elapsed_secs>"
+                    parts = line.split()
+                    if len(parts) >= 3:
+                        try:
+                            total_iters = int(parts[1])
+                            elapsed = float(parts[2])
+                            # Compute instantaneous rate
+                            now = time.time()
+                            if self._last_iter_ts > 0:
+                                dt = now - self._last_iter_ts
+                                if dt > 0.1:
+                                    self._gpu_iter_rate = (total_iters - self._last_iters) / dt
+                            self._last_iters = total_iters
+                            self._last_iter_ts = now
+                            self._gpu_iters = total_iters
+                            self._gpu_elapsed = elapsed
+                        except (ValueError, IndexError):
+                            pass
+
+                elif line.startswith("GPU_BUDGET"):
+                    # Parse matrix sizes: "... matrix_N=8192 ... B=32 M=1024 K=1024"
+                    import re
+                    m = re.search(r'matrix_N=(\d+)', line)
+                    if m:
+                        self._matrix_n = int(m.group(1))
+                    m = re.search(r'B=(\d+)', line)
+                    if m:
+                        self._batch_b = int(m.group(1))
+                    m = re.search(r'M=(\d+)', line)
+                    if m:
+                        self._batch_m = int(m.group(1))
+                    m = re.search(r'K=(\d+)', line)
+                    if m:
+                        self._batch_k = int(m.group(1))
+
+                if self._stop_event.is_set():
+                    break
         except Exception:
             pass
 
@@ -436,6 +574,13 @@ class GPUWorkload:
 
                 if success_marker in first_line:
                     self._method = name
+
+                    # Start background stdout reader to capture GPU_ITER + GPU_BUDGET
+                    self._stdout_reader = threading.Thread(
+                        target=self._read_subprocess_stdout, daemon=True
+                    )
+                    self._stdout_reader.start()
+
                     # Wait until stop event or process exits
                     while not self._stop_event.is_set():
                         if self._subprocess.poll() is not None:
@@ -455,3 +600,4 @@ class GPUWorkload:
 
         # All methods failed
         self._method = "none_available"
+

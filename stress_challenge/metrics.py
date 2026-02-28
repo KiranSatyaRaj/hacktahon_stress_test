@@ -57,6 +57,15 @@ class MetricSnapshot:
     gpu_mem_total_mb: float = 0.0
     gpu_clock_sm_mhz: float = 0.0
     gpu_clock_mem_mhz: float = 0.0
+    gpu_perf_state: int = -1                # P-state: 0=P0 (max), 8=P8 (idle)
+    gpu_throttle_reasons: str = ""          # decoded throttle reason bitmask
+    gpu_power_limit_w: float = 0.0          # max allowed power draw
+
+    # Workload performance
+    cpu_iter_sec: float = 0.0               # aggregate CPU matmul iterations/sec
+    cpu_gflops: float = 0.0                 # derived CPU GFLOPS
+    gpu_iter_sec: float = 0.0               # GPU stress iterations/sec
+    gpu_tflops: float = 0.0                 # derived GPU FP16 TFLOPS
 
     def to_dict(self):
         d = asdict(self)
@@ -86,6 +95,10 @@ class MetricsCollector:
         self._lock = threading.Lock()
         self._start_time: float = 0.0
 
+        # Optional references to workload objects for throughput polling
+        self._cpu_workload = None
+        self._gpu_workload = None
+
         # NVML init
         self._nvml_handle = None
         if HAS_NVML:
@@ -94,6 +107,11 @@ class MetricsCollector:
                 self._nvml_handle = pynvml.nvmlDeviceGetHandleByIndex(0)
             except Exception:
                 self._nvml_handle = None
+
+    def set_workloads(self, cpu_workload=None, gpu_workload=None):
+        """Give the collector references to workload objects for throughput polling."""
+        self._cpu_workload = cpu_workload
+        self._gpu_workload = gpu_workload
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -182,6 +200,9 @@ class MetricsCollector:
 
         # GPU metrics via NVML
         self._read_gpu_metrics(snap)
+
+        # Workload throughput + FLOPS
+        self._read_workload_throughput(snap)
 
         return snap
 
@@ -339,8 +360,80 @@ class MetricsCollector:
             except Exception:
                 snap.gpu_clock_mem_mhz = 0.0
 
+            # GPU performance state (P0=max, P8=idle)
+            try:
+                snap.gpu_perf_state = pynvml.nvmlDeviceGetPerformanceState(self._nvml_handle)
+            except Exception:
+                snap.gpu_perf_state = -1
+
+            # GPU throttle reasons (bitmask → human-readable)
+            try:
+                mask = pynvml.nvmlDeviceGetCurrentClocksThrottleReasons(self._nvml_handle)
+                snap.gpu_throttle_reasons = self._decode_throttle_reasons(mask)
+            except Exception:
+                snap.gpu_throttle_reasons = ""
+
+            # GPU power limit (max allowed power draw)
+            try:
+                limit = pynvml.nvmlDeviceGetPowerManagementLimit(self._nvml_handle)
+                snap.gpu_power_limit_w = round(limit / 1000.0, 2)
+            except Exception:
+                snap.gpu_power_limit_w = 0.0
+
         except Exception:
             snap.gpu_available = False
+
+    @staticmethod
+    def _decode_throttle_reasons(mask: int) -> str:
+        """
+        Decode NVML throttle reason bitmask into human-readable causes.
+        Returns comma-separated string of active reasons, or 'none'.
+        """
+        reasons = []
+        # Bitmask values from nvml.h
+        if mask & 0x0000000000000001:
+            reasons.append("GpuIdle")
+        if mask & 0x0000000000000002:
+            reasons.append("AppClocksSetting")
+        if mask & 0x0000000000000004:
+            reasons.append("SwPowerCap")
+        if mask & 0x0000000000000008:
+            reasons.append("HwSlowdown")
+        if mask & 0x0000000000000010:
+            reasons.append("SyncBoost")
+        if mask & 0x0000000000000020:
+            reasons.append("SwThermalSlowdown")
+        if mask & 0x0000000000000040:
+            reasons.append("HwThermalSlowdown")
+        if mask & 0x0000000000000080:
+            reasons.append("HwPowerBrakeSlowdown")
+        if mask & 0x0000000000000100:
+            reasons.append("DisplayClockSetting")
+        return ",".join(reasons) if reasons else "none"
+
+    def _read_workload_throughput(self, snap: MetricSnapshot):
+        """
+        Read throughput from workload objects (if set) and derive FLOPS.
+        CPU: GFLOPS = iter/s × 2 × N³ / 1e9  (for NxN float64 matmul)
+        GPU: read directly from GPUWorkload.get_tflops()
+        """
+        # CPU throughput + GFLOPS
+        if self._cpu_workload is not None:
+            try:
+                rate = self._cpu_workload.get_throughput()
+                snap.cpu_iter_sec = round(rate, 2)
+                N = config.CPU_MATRIX_SIZE
+                snap.cpu_gflops = round(rate * 2 * (N ** 3) / 1e9, 3)
+            except Exception:
+                pass
+
+        # GPU throughput + TFLOPS
+        if self._gpu_workload is not None:
+            try:
+                snap.gpu_iter_sec = round(self._gpu_workload.get_throughput(), 2)
+                snap.gpu_tflops = round(self._gpu_workload.get_tflops(), 3)
+            except Exception:
+                pass
 
     def shutdown_nvml(self):
         if HAS_NVML and self._nvml_handle:
@@ -434,11 +527,17 @@ class ConsoleLogger:
                 f"  │  {'GPU (NVML)':}{'':40}│",
                 f"  │    Utilisation: {s.gpu_util_percent:>5.1f} %{'':<33}│",
                 f"  │    Temperature: {s.gpu_temp_c:>5.1f} °C{'':<33}│",
-                f"  │    Power      : {s.gpu_power_w:>6.1f} W{'':<33}│",
+                f"  │    Power      : {s.gpu_power_w:>6.1f} / {s.gpu_power_limit_w:.0f} W{'':<27}│",
                 f"  │    VRAM       : {s.gpu_mem_used_mb:>7.1f} / {s.gpu_mem_total_mb:.1f} MB{'':<20}│",
                 f"  │    SM Clock   : {s.gpu_clock_sm_mhz:>6.0f} MHz{'':<32}│",
                 f"  │    Mem Clock  : {s.gpu_clock_mem_mhz:>6.0f} MHz{'':<32}│",
             ]
+            # Perf state + throttle reason on one line
+            pstate = f"P{s.gpu_perf_state}" if s.gpu_perf_state >= 0 else "N/A"
+            throttle = s.gpu_throttle_reasons or "none"
+            if len(throttle) > 30:
+                throttle = throttle[:28] + ".."
+            lines.append(f"  │    Perf State : {pstate:<5} Throttle: {throttle:<25}│")
         else:
             lines.append(f"  │  GPU          : not available / NVML unavailable{'':<11}│")
 
@@ -450,6 +549,22 @@ class ConsoleLogger:
                 lbl = fan.get("label", "fan")[:22]
                 rpm = fan.get("rpm", 0)
                 lines.append(f"  │    {lbl:<22}: {rpm:>5} RPM{'':<24}│")
+
+        # Performance block (throughput + FLOPS)
+        has_perf = s.cpu_iter_sec > 0 or s.gpu_iter_sec > 0
+        if has_perf:
+            lines.append(f"  ├{'─' * 60}┤")
+            lines.append(f"  │  {'PERFORMANCE':}{'':40}│")
+            if s.cpu_iter_sec > 0:
+                lines.append(
+                    f"  │    CPU : {s.cpu_iter_sec:>7.1f} iter/s"
+                    f"  │  {s.cpu_gflops:>7.2f} GFLOPS{'':<14}│"
+                )
+            if s.gpu_iter_sec > 0:
+                lines.append(
+                    f"  │    GPU : {s.gpu_iter_sec:>7.1f} iter/s"
+                    f"  │  {s.gpu_tflops:>7.3f} TFLOPS{'':<14}│"
+                )
 
         lines += [
             f"  └{'─' * 60}┘",

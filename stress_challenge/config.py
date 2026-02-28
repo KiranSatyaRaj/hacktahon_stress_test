@@ -14,6 +14,14 @@ CPU_MATRIX_SIZE = 1024                # NxN matrix for CPU stress
 CPU_WORKER_COUNT = multiprocessing.cpu_count()  # one per logical core
 GPU_MATRIX_SIZE = 2048                # NxN matrix for GPU stress (numpy fallback)
 
+# ── Core affinity (combined CPU+GPU mode) ────────────────────────────
+# Reserve 2 P-cores for the GPU subprocess so CUDA kernel submission
+# doesn't get starved when all cores are under CPU load.
+GPU_RESERVED_CORES = [0, 1]           # logical cores pinned to GPU subprocess
+CPU_COMBINED_WORKER_COUNT = max(1, multiprocessing.cpu_count() - len(GPU_RESERVED_CORES))
+ALL_CORES = list(range(multiprocessing.cpu_count()))
+CPU_ALLOWED_CORES = [c for c in ALL_CORES if c not in GPU_RESERVED_CORES]
+
 # ── Thermal thresholds ───────────────────────────────────────────────
 CPU_THROTTLE_TEMP_C = 95
 GPU_THROTTLE_TEMP_C = 85

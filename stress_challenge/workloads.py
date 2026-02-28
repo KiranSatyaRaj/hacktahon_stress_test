@@ -27,13 +27,23 @@ from . import config
 # ════════════════════════════════════════════════════════════════════════
 
 def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int,
-                iteration_counter: multiprocessing.Value):
+                iteration_counter: multiprocessing.Value,
+                allowed_cores: list[int] | None = None):
     """
     Single process that performs continuous matrix multiplication.
     Each process pins to its own NumPy computation (no GIL contention).
     Increments a shared counter every iteration so the main process can
     compute throughput (iter/s) and GFLOPS.
     """
+    # Pin this worker to specific core(s) if provided
+    if allowed_cores:
+        try:
+            # Round-robin: each worker gets one core from the allowed set
+            core = allowed_cores[worker_id % len(allowed_cores)]
+            os.sched_setaffinity(0, {core})
+        except (OSError, AttributeError):
+            pass  # Windows or permission error — fall back to OS scheduling
+
     size = config.CPU_MATRIX_SIZE
     rng = np.random.default_rng(seed=worker_id)
 
@@ -61,8 +71,22 @@ def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int,
 class CPUWorkload:
     """Manages a pool of CPU stress worker processes."""
 
-    def __init__(self, num_workers: int = config.CPU_WORKER_COUNT):
-        self.num_workers = num_workers
+    def __init__(self, num_workers: int | None = None,
+                 allowed_cores: list[int] | None = None):
+        """
+        Args:
+            num_workers: Number of worker processes. Defaults to cpu_count()
+                         or len(allowed_cores) if provided.
+            allowed_cores: List of logical core IDs to pin workers to.
+                          None = no pinning (use all cores).
+        """
+        self._allowed_cores = allowed_cores
+        if num_workers is not None:
+            self.num_workers = num_workers
+        elif allowed_cores is not None:
+            self.num_workers = len(allowed_cores)
+        else:
+            self.num_workers = config.CPU_WORKER_COUNT
         self._stop_event = multiprocessing.Event()
         self._processes: list[multiprocessing.Process] = []
         # Shared iteration counter: total iterations across ALL workers
@@ -98,7 +122,8 @@ class CPUWorkload:
         for i in range(self.num_workers):
             p = multiprocessing.Process(
                 target=_cpu_worker,
-                args=(self._stop_event, i, self._iteration_counter),
+                args=(self._stop_event, i, self._iteration_counter,
+                      self._allowed_cores),
                 daemon=True,
             )
             p.start()
@@ -133,6 +158,19 @@ def handler(sig, frame):
     keep_running = False
 signal.signal(signal.SIGTERM, handler)
 signal.signal(signal.SIGINT, handler)
+
+# ── Core affinity + priority (set by parent in combined mode) ─────
+pin_cores = os.environ.get("GPU_PIN_CORES", "")
+if pin_cores:
+    try:
+        cores = [int(c) for c in pin_cores.split(",") if c.strip()]
+        os.sched_setaffinity(0, set(cores))
+    except (OSError, AttributeError, ValueError):
+        pass
+try:
+    os.nice(-5)  # elevate priority for CUDA kernel submission
+except (OSError, PermissionError):
+    pass
 
 try:
     import torch
@@ -371,11 +409,12 @@ class GPUWorkload:
     4. nvidia-smi clock boosting (minimal stress)
     """
 
-    def __init__(self):
+    def __init__(self, combined_mode: bool = False):
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
         self._subprocess: subprocess.Popen | None = None
         self._method = "none"
+        self._combined_mode = combined_mode
         # Throughput tracking (parsed from subprocess stdout)
         self._gpu_iters: int = 0
         self._gpu_elapsed: float = 0.0
@@ -589,11 +628,19 @@ class GPUWorkload:
             interpreter = torch_python if name == "torch_cuda" else python_path
 
             try:
+                # Build env with optional core pinning
+                env = os.environ.copy()
+                if self._combined_mode:
+                    env["GPU_PIN_CORES"] = ",".join(
+                        str(c) for c in config.GPU_RESERVED_CORES
+                    )
+
                 self._subprocess = subprocess.Popen(
                     [interpreter, "-c", script],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=env,
                 )
 
                 # Wait for the first line of output to determine if it succeeded

@@ -131,13 +131,17 @@ async def start_test():
     )
     event_logger.start()
 
-    # Start workloads
+    # Start workloads — in combined mode, pin cores for isolation
+    combined = test_config["cpu_enabled"] and test_config["gpu_enabled"]
+
     if test_config["cpu_enabled"]:
-        cpu_workload = CPUWorkload()
+        cpu_workload = CPUWorkload(
+            allowed_cores=config.CPU_ALLOWED_CORES if combined else None,
+        )
         cpu_workload.start()
 
     if test_config["gpu_enabled"]:
-        gpu_workload = GPUWorkload()
+        gpu_workload = GPUWorkload(combined_mode=combined)
         gpu_workload.start()
 
     # Give the collector references to poll throughput/FLOPS
@@ -274,13 +278,17 @@ def _cli_auto_start():
     )
     event_logger.start()
 
-    # Start workloads
+    # Start workloads — in combined mode, pin cores for isolation
+    combined = test_config["cpu_enabled"] and test_config["gpu_enabled"]
+
     if test_config["cpu_enabled"]:
-        cpu_workload = CPUWorkload()
+        cpu_workload = CPUWorkload(
+            allowed_cores=config.CPU_ALLOWED_CORES if combined else None,
+        )
         cpu_workload.start()
 
     if test_config["gpu_enabled"]:
-        gpu_workload = GPUWorkload()
+        gpu_workload = GPUWorkload(combined_mode=combined)
         gpu_workload.start()
 
     # Give the collector references to poll throughput/FLOPS

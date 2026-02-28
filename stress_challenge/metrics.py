@@ -67,6 +67,15 @@ class MetricSnapshot:
     gpu_iter_sec: float = 0.0               # GPU stress iterations/sec
     gpu_tflops: float = 0.0                 # derived GPU FP16 TFLOPS
 
+    # CUDA memory fragmentation
+    cuda_mem_allocated_mb: float = 0.0      # actively allocated VRAM
+    cuda_mem_reserved_mb: float = 0.0       # reserved by caching allocator
+    cuda_mem_frag_mb: float = 0.0           # reserved - allocated = wasted
+
+    # CPU time breakdown
+    cpu_user_pct: float = 0.0               # % of CPU time in user mode
+    cpu_kernel_pct: float = 0.0             # % of CPU time in kernel mode
+
     def to_dict(self):
         d = asdict(self)
         # Flatten lists for CSV / JSON
@@ -203,6 +212,9 @@ class MetricsCollector:
 
         # Workload throughput + FLOPS
         self._read_workload_throughput(snap)
+
+        # CPU user vs kernel time breakdown
+        self._read_cpu_times(snap)
 
         return snap
 
@@ -432,8 +444,24 @@ class MetricsCollector:
             try:
                 snap.gpu_iter_sec = round(self._gpu_workload.get_throughput(), 2)
                 snap.gpu_tflops = round(self._gpu_workload.get_tflops(), 3)
+                # CUDA memory fragmentation
+                snap.cuda_mem_allocated_mb = round(self._gpu_workload.cuda_mem_allocated_mb, 1)
+                snap.cuda_mem_reserved_mb = round(self._gpu_workload.cuda_mem_reserved_mb, 1)
+                snap.cuda_mem_frag_mb = round(self._gpu_workload.cuda_mem_frag_mb, 1)
             except Exception:
                 pass
+
+    def _read_cpu_times(self, snap: MetricSnapshot):
+        """
+        Read CPU user vs kernel time percentages.
+        Uses psutil.cpu_times_percent() to get the breakdown since last call.
+        """
+        try:
+            ct = psutil.cpu_times_percent(interval=None)
+            snap.cpu_user_pct = round(ct.user + getattr(ct, 'nice', 0.0), 1)
+            snap.cpu_kernel_pct = round(ct.system + getattr(ct, 'iowait', 0.0), 1)
+        except Exception:
+            pass
 
     def shutdown_nvml(self):
         if HAS_NVML and self._nvml_handle:
@@ -532,6 +560,13 @@ class ConsoleLogger:
                 f"  │    SM Clock   : {s.gpu_clock_sm_mhz:>6.0f} MHz{'':<32}│",
                 f"  │    Mem Clock  : {s.gpu_clock_mem_mhz:>6.0f} MHz{'':<32}│",
             ]
+            # CUDA memory fragmentation (only if GPU workload is active)
+            if s.cuda_mem_allocated_mb > 0:
+                lines.append(
+                    f"  │    CUDA Mem   : {s.cuda_mem_allocated_mb:>6.0f} alloc"
+                    f" / {s.cuda_mem_reserved_mb:.0f} rsv"
+                    f"  frag={s.cuda_mem_frag_mb:.0f} MB{'':<6}│"
+                )
             # Perf state + throttle reason on one line
             pstate = f"P{s.gpu_perf_state}" if s.gpu_perf_state >= 0 else "N/A"
             throttle = s.gpu_throttle_reasons or "none"
@@ -550,7 +585,7 @@ class ConsoleLogger:
                 rpm = fan.get("rpm", 0)
                 lines.append(f"  │    {lbl:<22}: {rpm:>5} RPM{'':<24}│")
 
-        # Performance block (throughput + FLOPS)
+        # Performance block (throughput + FLOPS + CPU time)
         has_perf = s.cpu_iter_sec > 0 or s.gpu_iter_sec > 0
         if has_perf:
             lines.append(f"  ├{'─' * 60}┤")
@@ -564,6 +599,12 @@ class ConsoleLogger:
                 lines.append(
                     f"  │    GPU : {s.gpu_iter_sec:>7.1f} iter/s"
                     f"  │  {s.gpu_tflops:>7.3f} TFLOPS{'':<14}│"
+                )
+            # CPU user vs kernel time
+            if s.cpu_user_pct > 0:
+                lines.append(
+                    f"  │    CPU Time: user {s.cpu_user_pct:>5.1f}%"
+                    f"  kernel {s.cpu_kernel_pct:>5.1f}%{'':<19}│"
                 )
 
         lines += [

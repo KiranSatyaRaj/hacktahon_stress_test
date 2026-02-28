@@ -529,6 +529,17 @@ function updateStats(data) {
     if (data.gpu_tflops > 0) {
         document.getElementById('statGpuTflops').textContent = data.gpu_tflops.toFixed(2);
     }
+
+    // CUDA memory fragmentation
+    if (data.cuda_mem_frag_mb !== undefined && data.cuda_mem_frag_mb > 0) {
+        document.getElementById('statCudaFrag').textContent = data.cuda_mem_frag_mb.toFixed(0) + ' MB';
+    }
+
+    // CPU user/kernel time
+    if (data.cpu_user_pct > 0) {
+        document.getElementById('statCpuTime').textContent =
+            data.cpu_user_pct.toFixed(0) + '% / ' + (data.cpu_kernel_pct || 0).toFixed(0) + '%';
+    }
 }
 
 // ── UI State ──────────────────────────────────────────────────

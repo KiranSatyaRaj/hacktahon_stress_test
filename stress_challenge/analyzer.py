@@ -149,6 +149,61 @@ class PerformanceAnalyzer:
             direction = "rising" if slope > 0.05 else "stable" if abs(slope) <= 0.05 else "cooling"
             self._line(f"  CPU Temperature trend: {direction} ({slope:+.3f} °C/sample)")
 
+        # ── FLOPS Throughput Analysis ──────────────────────────────────
+        cpu_gflops = [s.cpu_gflops for s in self.snapshots if s.cpu_gflops > 0]
+        gpu_tflops = [s.gpu_tflops for s in self.snapshots if s.gpu_tflops > 0]
+
+        self._line("")
+
+        # CPU GFLOPS consistency (CoV)
+        if len(cpu_gflops) >= 5:
+            mean_g = statistics.mean(cpu_gflops)
+            stdev_g = statistics.stdev(cpu_gflops) if len(cpu_gflops) >= 2 else 0
+            cov_g = (stdev_g / mean_g * 100) if mean_g > 0 else 0
+            self._line(f"  CPU GFLOPS  — mean: {mean_g:.2f}  stdev: {stdev_g:.2f}  CoV: {cov_g:.1f}%")
+            # Degradation: first 20% of samples vs last 20%
+            window = max(3, len(cpu_gflops) // 5)
+            early = statistics.mean(cpu_gflops[:window])
+            late = statistics.mean(cpu_gflops[-window:])
+            degradation = ((early - late) / early * 100) if early > 0 else 0
+            self._line(f"  CPU degradation: {degradation:+.1f}%  (early {early:.2f} → late {late:.2f} GFLOPS)")
+
+        # GPU TFLOPS consistency (CoV)
+        if len(gpu_tflops) >= 5:
+            mean_t = statistics.mean(gpu_tflops)
+            stdev_t = statistics.stdev(gpu_tflops) if len(gpu_tflops) >= 2 else 0
+            cov_t = (stdev_t / mean_t * 100) if mean_t > 0 else 0
+            self._line(f"  GPU TFLOPS  — mean: {mean_t:.3f}  stdev: {stdev_t:.3f}  CoV: {cov_t:.1f}%")
+            window = max(3, len(gpu_tflops) // 5)
+            early = statistics.mean(gpu_tflops[:window])
+            late = statistics.mean(gpu_tflops[-window:])
+            degradation = ((early - late) / early * 100) if early > 0 else 0
+            self._line(f"  GPU degradation: {degradation:+.1f}%  (early {early:.3f} → late {late:.3f} TFLOPS)")
+
+        # CPU user vs kernel time breakdown
+        user_pcts = [s.cpu_user_pct for s in self.snapshots if s.cpu_user_pct > 0]
+        kern_pcts = [s.cpu_kernel_pct for s in self.snapshots if s.cpu_kernel_pct > 0]
+        if user_pcts and kern_pcts:
+            self._line(f"  CPU time — user avg: {statistics.mean(user_pcts):.1f}%"
+                       f"  kernel avg: {statistics.mean(kern_pcts):.1f}%")
+
+        # GPU throttle event summary
+        throttle_events = [s.gpu_throttle_reasons for s in self.snapshots
+                          if s.gpu_throttle_reasons and s.gpu_throttle_reasons != "none"]
+        if throttle_events:
+            # Count unique throttle reasons
+            reason_counts: dict[str, int] = {}
+            for reasons in throttle_events:
+                for r in reasons.split(","):
+                    r = r.strip()
+                    if r:
+                        reason_counts[r] = reason_counts.get(r, 0) + 1
+            self._line(f"  GPU throttle events: {len(throttle_events)} samples affected")
+            for reason, count in sorted(reason_counts.items(), key=lambda x: -x[1]):
+                self._line(f"    {reason}: {count} occurrences")
+        else:
+            self._line("  GPU throttle events: none detected")
+
     def _bottleneck_summary(self):
         self._section("BOTTLENECK IDENTIFICATION")
         bottlenecks = []

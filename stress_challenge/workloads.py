@@ -219,10 +219,14 @@ try:
         torch.cuda.synchronize()
         iters += 1
 
-        # Report throughput every ~2 seconds
+        # Report throughput + CUDA memory every ~2 seconds
         now = time.time()
         if now - t_last_report >= 2.0:
+            alloc = torch.cuda.memory_allocated(0)
+            resrv = torch.cuda.memory_reserved(0)
+            frag = resrv - alloc
             print(f"GPU_ITER {iters} {now - t_start:.2f}", flush=True)
+            print(f"GPU_MEM alloc={alloc} reserved={resrv} frag={frag}", flush=True)
             t_last_report = now
 
 except Exception as e:
@@ -384,6 +388,10 @@ class GPUWorkload:
         self._batch_m: int = 0
         self._batch_k: int = 0
         self._stdout_reader: threading.Thread | None = None
+        # CUDA memory fragmentation (from GPU_MEM stdout)
+        self._cuda_alloc: int = 0       # bytes actively allocated
+        self._cuda_reserved: int = 0    # bytes reserved by caching allocator
+        self._cuda_frag: int = 0        # reserved - allocated = waste
 
     @property
     def method(self) -> str:
@@ -407,6 +415,19 @@ class GPUWorkload:
         # Per iteration: 2× NxN GEMM + 1× batched BxMxK @ BxKxM
         ops_per_iter = 2 * (2 * N * N * N) + B * (2 * M * K * M)
         return rate * ops_per_iter / 1e12
+
+    @property
+    def cuda_mem_frag_mb(self) -> float:
+        """CUDA memory fragmentation in MB (reserved - allocated)."""
+        return self._cuda_frag / (1024 ** 2)
+
+    @property
+    def cuda_mem_allocated_mb(self) -> float:
+        return self._cuda_alloc / (1024 ** 2)
+
+    @property
+    def cuda_mem_reserved_mb(self) -> float:
+        return self._cuda_reserved / (1024 ** 2)
 
     def start(self):
         self._stop_event.clear()
@@ -483,6 +504,19 @@ class GPUWorkload:
                     m = re.search(r'K=(\d+)', line)
                     if m:
                         self._batch_k = int(m.group(1))
+
+                elif line.startswith("GPU_MEM "):
+                    # Format: "GPU_MEM alloc=X reserved=Y frag=Z"
+                    import re
+                    m = re.search(r'alloc=(\d+)', line)
+                    if m:
+                        self._cuda_alloc = int(m.group(1))
+                    m = re.search(r'reserved=(\d+)', line)
+                    if m:
+                        self._cuda_reserved = int(m.group(1))
+                    m = re.search(r'frag=(\d+)', line)
+                    if m:
+                        self._cuda_frag = int(m.group(1))
 
                 if self._stop_event.is_set():
                     break

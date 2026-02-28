@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,11 +8,15 @@
     <meta name="description" content="Real-time system performance monitoring during sustained stress testing">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap"
+        rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
     <link rel="stylesheet" href="/style.css">
 </head>
+
 <body>
     <!-- Animated background particles -->
     <div class="bg-particles" id="particles"></div>
@@ -238,6 +243,14 @@
                 <div class="stat-label">GPU TFLOPS</div>
                 <div class="stat-value" id="statGpuTflops">--</div>
             </div>
+            <div class="stat-card">
+                <div class="stat-label">CUDA Frag</div>
+                <div class="stat-value" id="statCudaFrag">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">CPU User/Kernel</div>
+                <div class="stat-value" id="statCpuTime" style="font-size:0.8em">--</div>
+            </div>
         </div>
 
         <!-- Report Modal -->
@@ -254,4 +267,5 @@
 
     <script src="/app.js"></script>
 </body>
+
 </html>

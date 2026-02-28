@@ -76,6 +76,11 @@ class MetricSnapshot:
     cpu_user_pct: float = 0.0               # % of CPU time in user mode
     cpu_kernel_pct: float = 0.0             # % of CPU time in kernel mode
 
+    # Adaptive controller state
+    controller_risk: float = 0.0            # composite risk score 0.0–1.0
+    controller_level: str = ""              # SAFE / WARNING / CRITICAL
+    controller_action: str = ""             # last action taken
+
     def to_dict(self):
         d = asdict(self)
         # Flatten lists for CSV / JSON
@@ -107,6 +112,7 @@ class MetricsCollector:
         # Optional references to workload objects for throughput polling
         self._cpu_workload = None
         self._gpu_workload = None
+        self._controller = None  # AdaptiveController reference
 
         # NVML init
         self._nvml_handle = None
@@ -121,6 +127,10 @@ class MetricsCollector:
         """Give the collector references to workload objects for throughput polling."""
         self._cpu_workload = cpu_workload
         self._gpu_workload = gpu_workload
+
+    def set_controller(self, controller):
+        """Give the collector a reference to the adaptive controller."""
+        self._controller = controller
 
     # ── Public API ───────────────────────────────────────────────────
 
@@ -215,6 +225,12 @@ class MetricsCollector:
 
         # CPU user vs kernel time breakdown
         self._read_cpu_times(snap)
+
+        # Adaptive controller state (if active)
+        if self._controller is not None:
+            snap.controller_risk = self._controller.risk
+            snap.controller_level = self._controller.level
+            snap.controller_action = self._controller.last_action
 
         return snap
 
@@ -606,6 +622,16 @@ class ConsoleLogger:
                     f"  │    CPU Time: user {s.cpu_user_pct:>5.1f}%"
                     f"  kernel {s.cpu_kernel_pct:>5.1f}%{'':<19}│"
                 )
+
+        # Controller status (if active)
+        if s.controller_level:
+            lines.append(f"  ├{'─' * 60}┤")
+            level_icon = {"SAFE": "✅", "WARNING": "⚠️", "CRITICAL": "🚨"}.get(s.controller_level, "❓")
+            lines.append(
+                f"  │  {level_icon} CONTROLLER: {s.controller_level:<8}"
+                f" Risk: {s.controller_risk:.2f}"
+                f"  Action: {(s.controller_action or 'hold'):<16}│"
+            )
 
         lines += [
             f"  └{'─' * 60}┘",

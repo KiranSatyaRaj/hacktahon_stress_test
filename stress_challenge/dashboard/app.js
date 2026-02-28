@@ -540,6 +540,15 @@ function updateStats(data) {
         document.getElementById('statCpuTime').textContent =
             data.cpu_user_pct.toFixed(0) + '% / ' + (data.cpu_kernel_pct || 0).toFixed(0) + '%';
     }
+
+    // Controller Status
+    const ctrlLevel = data.controller_level || '';
+    if (ctrlLevel) {
+        const el = document.getElementById('statController');
+        const risk = (data.controller_risk || 0).toFixed(2);
+        el.textContent = `${ctrlLevel} (Risk: ${risk})`;
+        el.style.color = ctrlLevel === 'SAFE' ? '#22c55e' : ctrlLevel === 'WARNING' ? '#eab308' : '#ef4444';
+    }
 }
 
 // ── UI State ──────────────────────────────────────────────────

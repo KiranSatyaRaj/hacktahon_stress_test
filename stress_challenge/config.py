@@ -26,6 +26,20 @@ CPU_ALLOWED_CORES = [c for c in ALL_CORES if c not in GPU_RESERVED_CORES]
 CPU_THROTTLE_TEMP_C = 95
 GPU_THROTTLE_TEMP_C = 85
 
+# ── Adaptive Controller ─────────────────────────────────────────────
+# Thermal zones (°C) — the controller takes action based on these
+CPU_SAFE_TEMP = 82                    # below = no action needed
+CPU_WARNING_TEMP = 88                 # above = reduce workload gently
+CPU_CRITICAL_TEMP = 93                # above = aggressive reduction
+GPU_SAFE_TEMP = 78
+GPU_WARNING_TEMP = 83
+# Controller timing
+CONTROLLER_TICK_INTERVAL = 5          # seconds between controller evaluations
+RECOVERY_COOLDOWN_SECS = 30           # wait this long in SAFE before recovering
+# Risk thresholds
+RISK_WARNING = 0.65
+RISK_CRITICAL = 0.80
+
 # ── Output ───────────────────────────────────────────────────────────
 DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
 CSV_FILENAME = "metrics.csv"

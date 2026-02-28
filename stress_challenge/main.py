@@ -23,6 +23,7 @@ from . import config
 from .metrics import MetricsCollector, ConsoleLogger, EventLogger
 from .workloads import CPUWorkload, GPUWorkload
 from .analyzer import PerformanceAnalyzer
+from .controller import AdaptiveController
 
 # ── Global State ─────────────────────────────────────────────────────
 collector: MetricsCollector | None = None
@@ -30,6 +31,7 @@ console_logger: ConsoleLogger | None = None
 event_logger: EventLogger | None = None
 cpu_workload: CPUWorkload | None = None
 gpu_workload: GPUWorkload | None = None
+adaptive_controller: AdaptiveController | None = None
 test_config = {
     "duration": config.DEFAULT_DURATION_SECONDS,
     "interval": config.DEFAULT_SAMPLE_INTERVAL,
@@ -37,6 +39,7 @@ test_config = {
     "output_dir": config.DEFAULT_OUTPUT_DIR,
     "cpu_enabled": True,
     "gpu_enabled": True,
+    "controller_enabled": False,
     "start_time": 0.0,
     "running": False,
     "completed": False,
@@ -149,6 +152,17 @@ async def start_test():
         cpu_workload=cpu_workload if test_config["cpu_enabled"] else None,
         gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
     )
+
+    # Adaptive controller (if enabled)
+    if test_config["controller_enabled"]:
+        adaptive_controller = AdaptiveController(
+            collector=collector,
+            cpu_workload=cpu_workload if test_config["cpu_enabled"] else None,
+            gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
+            output_dir=test_config["output_dir"],
+        )
+        collector.set_controller(adaptive_controller)
+        adaptive_controller.start()
 
     # Schedule auto-stop
     threading.Thread(target=_auto_stop_timer, daemon=True).start()
@@ -297,11 +311,23 @@ def _cli_auto_start():
         gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
     )
 
+    # Adaptive controller (if enabled)
+    if test_config["controller_enabled"]:
+        adaptive_controller = AdaptiveController(
+            collector=collector,
+            cpu_workload=cpu_workload if test_config["cpu_enabled"] else None,
+            gpu_workload=gpu_workload if test_config["gpu_enabled"] else None,
+            output_dir=test_config["output_dir"],
+        )
+        collector.set_controller(adaptive_controller)
+        adaptive_controller.start()
+
     # Schedule auto-stop
     threading.Thread(target=_auto_stop_timer, daemon=True).start()
 
+    ctrl_msg = " | 🔧 Controller: ACTIVE" if test_config["controller_enabled"] else ""
     print(f"    ✅ Stress test running — console updates every "
-          f"{test_config['log_interval']:.0f}s | dashboard: "
+          f"{test_config['log_interval']:.0f}s{ctrl_msg} | dashboard: "
           f"http://localhost:{test_config.get('port', config.DASHBOARD_PORT)}\n",
           flush=True)
 
@@ -319,7 +345,7 @@ def _auto_stop_timer():
 
 def _stop_all():
     """Gracefully stop workloads, collect final metrics, run analysis."""
-    global collector, console_logger, event_logger, cpu_workload, gpu_workload
+    global collector, console_logger, event_logger, cpu_workload, gpu_workload, adaptive_controller
 
     if not test_config["running"]:
         return
@@ -331,6 +357,8 @@ def _stop_all():
         cpu_workload.stop()
     if gpu_workload:
         gpu_workload.stop()
+    if adaptive_controller:
+        adaptive_controller.stop()
 
     # Stop console logger
     if console_logger:
@@ -395,6 +423,10 @@ Examples:
                         help="Auto-start stress test immediately on launch (default: True)")
     parser.add_argument("--no-auto-start", dest="auto_start", action="store_false",
                         help="Wait for browser dashboard to start the test")
+    parser.add_argument("--controller", action="store_true", default=False,
+                        help="Enable adaptive feedback controller for workload stabilisation")
+    parser.add_argument("--no-controller", dest="controller", action="store_false",
+                        help="Run without adaptive controller (baseline mode)")
 
     args = parser.parse_args()
 
@@ -410,6 +442,15 @@ Examples:
     if args.gpu_only:
         test_config["cpu_enabled"] = False
 
+    # Controller mode + auto output dir
+    test_config["controller_enabled"] = args.controller
+    if args.output == config.DEFAULT_OUTPUT_DIR:
+        # Auto-separate: output/baseline vs output/controlled
+        mode_name = "controlled" if args.controller else "baseline"
+        test_config["output_dir"] = os.path.join(args.output, mode_name)
+    else:
+        test_config["output_dir"] = args.output
+
     _auto_start_flag = args.auto_start
 
     mins = args.duration // 60
@@ -419,18 +460,20 @@ Examples:
     ╔══════════════════════════════════════════════════════════════╗
     ║        🔥  SUSTAINED PERFORMANCE STRESS CHALLENGE  🔥       ║
     ╠══════════════════════════════════════════════════════════════╣
-    ║  Duration  : {:>4}m {:>2}s                                    ║
-    ║  CPU       : {}                                          ║
-    ║  GPU       : {}                                          ║
-    ║  Dashboard : http://{}:{:<5}                       ║
-    ║  Output    : {:<46} ║
+    ║  Duration   : {:>4}m {:>2}s                                    ║
+    ║  CPU        : {}                                          ║
+    ║  GPU        : {}                                          ║
+    ║  Controller : {}                                          ║
+    ║  Dashboard  : http://{}:{:<5}                       ║
+    ║  Output     : {:<44} ║
     ╚══════════════════════════════════════════════════════════════╝
     """.format(
         mins, secs,
         "Enabled " if test_config["cpu_enabled"] else "Disabled",
         "Enabled " if test_config["gpu_enabled"] else "Disabled",
+        "Enabled " if test_config["controller_enabled"] else "Disabled",
         "localhost", args.port,
-        args.output[:46],
+        test_config["output_dir"][:44],
     ))
 
     if _auto_start_flag:

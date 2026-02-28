@@ -28,6 +28,7 @@ from . import config
 
 def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int,
                 iteration_counter: multiprocessing.Value,
+                sleep_ms: multiprocessing.Value,
                 allowed_cores: list[int] | None = None):
     """
     Single process that performs continuous matrix multiplication.
@@ -63,6 +64,11 @@ def _cpu_worker(stop_event: multiprocessing.Event, worker_id: int,
         with iteration_counter.get_lock():
             iteration_counter.value += 1
 
+        # Controller-injected micro-sleep (reduces heat without stopping)
+        ms = sleep_ms.value
+        if ms > 0:
+            time.sleep(ms / 1000.0)
+
         if iteration % 5 == 0:
             if stop_event.is_set():
                 break
@@ -93,6 +99,16 @@ class CPUWorkload:
         self._iteration_counter = multiprocessing.Value('L', 0)  # unsigned long
         self._last_count: int = 0
         self._last_ts: float = 0.0
+        # Controller-adjustable sleep (ms between iterations, 0 = no sleep)
+        self._sleep_ms = multiprocessing.Value('d', 0.0)  # double
+
+    def set_sleep_ms(self, ms: float):
+        """Controller API: inject inter-iteration sleep across all workers."""
+        self._sleep_ms.value = max(0.0, ms)
+
+    @property
+    def current_sleep_ms(self) -> float:
+        return self._sleep_ms.value
 
     @property
     def iteration_count(self) -> int:
@@ -117,13 +133,14 @@ class CPUWorkload:
     def start(self):
         self._stop_event.clear()
         self._iteration_counter.value = 0
+        self._sleep_ms.value = 0.0
         self._last_count = 0
         self._last_ts = 0.0
         for i in range(self.num_workers):
             p = multiprocessing.Process(
                 target=_cpu_worker,
                 args=(self._stop_event, i, self._iteration_counter,
-                      self._allowed_cores),
+                      self._sleep_ms, self._allowed_cores),
                 daemon=True,
             )
             p.start()

@@ -45,6 +45,9 @@ class MetricSnapshot:
     cpu_temp_package: float = 0.0
     cpu_temp_cores: list = field(default_factory=list)
 
+    # Fans (all sensors: CPU + GPU cooler, etc.)
+    fan_readings: list = field(default_factory=list)   # [{label, rpm}]
+
     # GPU
     gpu_available: bool = False
     gpu_util_percent: float = 0.0
@@ -62,6 +65,9 @@ class MetricSnapshot:
             d[f"cpu_core_{i}_percent"] = v
         for i, v in enumerate(d.pop("cpu_temp_cores", [])):
             d[f"cpu_temp_core_{i}"] = v
+        for reading in d.pop("fan_readings", []):
+            label = reading.get("label", "fan").replace(" ", "_").lower()
+            d[f"fan_{label}_rpm"] = reading.get("rpm", 0)
         return d
 
 
@@ -171,6 +177,9 @@ class MetricsCollector:
         # CPU thermals (via lm_sensors)
         self._read_cpu_temps(snap)
 
+        # Fan RPM (CPU + GPU cooler via hwmon/psutil)
+        self._read_fan_metrics(snap)
+
         # GPU metrics via NVML
         self._read_gpu_metrics(snap)
 
@@ -179,6 +188,10 @@ class MetricsCollector:
     _temp_cache: tuple = (0.0, [])   # (package_temp, core_temps)
     _temp_cache_ts: float = 0.0       # timestamp of last successful read
     _TEMP_CACHE_TTL: float = 2.0      # seconds between actual queries
+
+    _fan_cache: list = []             # [{label, rpm}]
+    _fan_cache_ts: float = 0.0
+    _FAN_CACHE_TTL: float = 2.0       # fan RPM changes slowly — 2 s is fine
 
     def _read_cpu_temps(self, snap: MetricSnapshot):
         """
@@ -249,6 +262,39 @@ class MetricsCollector:
         self._temp_cache_ts = now
         snap.cpu_temp_package = package_temp
         snap.cpu_temp_cores = core_temps
+
+    def _read_fan_metrics(self, snap: MetricSnapshot):
+        """
+        Read fan RPM for all fans exposed by the kernel (CPU cooler, GPU
+        cooler, chassis fans). Uses psutil.sensors_fans() which reads the
+        Linux hwmon subsystem — same source as `lm-sensors`.
+        Results are cached for _FAN_CACHE_TTL seconds.
+        """
+        now = time.time()
+        if now - self._fan_cache_ts < self._FAN_CACHE_TTL:
+            snap.fan_readings = list(self._fan_cache)
+            return
+
+        readings: list = []
+        try:
+            all_fans = psutil.sensors_fans()
+            if all_fans:
+                for sensor_name, entries in all_fans.items():
+                    for entry in entries:
+                        label = (
+                            f"{sensor_name}_{entry.label}"
+                            if entry.label
+                            else sensor_name
+                        )
+                        readings.append({"label": label, "rpm": int(entry.current)})
+        except AttributeError:
+            pass  # Windows — psutil.sensors_fans() not available
+        except Exception:
+            pass
+
+        self._fan_cache = readings
+        self._fan_cache_ts = now
+        snap.fan_readings = list(readings)
 
     def _read_gpu_metrics(self, snap: MetricSnapshot):
         """Read GPU metrics via pynvml."""
@@ -395,6 +441,15 @@ class ConsoleLogger:
             ]
         else:
             lines.append(f"  │  GPU          : not available / NVML unavailable{'':<11}│")
+
+        # Fans block
+        if s.fan_readings:
+            lines.append(f"  ├{'─' * 60}┤")
+            lines.append(f"  │  {'FANS':}{'':40}│")
+            for fan in s.fan_readings:
+                lbl = fan.get("label", "fan")[:22]
+                rpm = fan.get("rpm", 0)
+                lines.append(f"  │    {lbl:<22}: {rpm:>5} RPM{'':<24}│")
 
         lines += [
             f"  └{'─' * 60}┘",

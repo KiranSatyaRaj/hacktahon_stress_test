@@ -122,6 +122,13 @@ try:
     N = (N // 64) * 64  # round to multiple of 64 for Tensor Core alignment
     N = max(N, 2048)
 
+    print(
+        f"GPU_BUDGET  vram={vram_bytes} budget={budget_bytes}"
+        f" ({budget_bytes/1024**3:.2f} GB)  matrix_N={N}"
+        f" ({N*N*2/1024**2:.0f} MB per FP16 matrix)",
+        flush=True,
+    )
+
     # Batch matmul sizing: B batches of MxK @ KxN, float16
     B, M, K = 64, 1024, 1024
 

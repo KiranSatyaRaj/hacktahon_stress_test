@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🔥 Stress Challenge — Live Dashboard</title>
+    <meta name="description" content="Real-time system performance monitoring during sustained stress testing">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-annotation@3.0.1/dist/chartjs-plugin-annotation.min.js"></script>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Animated background particles -->
+    <div class="bg-particles" id="particles"></div>
+
+    <!-- Main container -->
+    <div class="dashboard">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <div class="logo-pulse">
+                    <span class="fire-icon">🔥</span>
+                </div>
+                <div>
+                    <h1 class="title">Stress Challenge</h1>
+                    <p class="subtitle">Sustained Performance Monitor</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-badge" id="statusBadge">
+                    <span class="status-dot"></span>
+                    <span class="status-text">IDLE</span>
+                </div>
+                <div class="timer" id="timer">00:00:00</div>
+            </div>
+        </header>
+
+        <!-- Controls -->
+        <div class="controls">
+            <button class="btn btn-start" id="btnStart" onclick="startTest()">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                </svg>
+                Start Stress Test
+            </button>
+            <button class="btn btn-stop" id="btnStop" onclick="stopTest()" disabled>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+                </svg>
+                Stop Test
+            </button>
+            <button class="btn btn-report" id="btnReport" onclick="viewReport()" disabled>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                </svg>
+                View Report
+            </button>
+        </div>
+
+        <!-- Progress bar -->
+        <div class="progress-container" id="progressContainer">
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+                <div class="progress-glow" id="progressGlow"></div>
+            </div>
+            <div class="progress-labels">
+                <span id="progressPercent">0%</span>
+                <span id="progressEta">ETA: --:--:--</span>
+            </div>
+        </div>
+
+        <!-- Gauge Grid -->
+        <div class="gauge-grid">
+            <!-- CPU Gauge -->
+            <div class="gauge-card" id="cpuGaugeCard">
+                <div class="gauge-header">
+                    <span class="gauge-icon">⚡</span>
+                    <span class="gauge-title">CPU Usage</span>
+                </div>
+                <div class="gauge-ring-container">
+                    <svg class="gauge-ring" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"></circle>
+                        <circle class="gauge-fill cpu-fill" id="cpuGaugeFill" cx="60" cy="60" r="52"></circle>
+                    </svg>
+                    <div class="gauge-value" id="cpuGaugeValue">0<span class="gauge-unit">%</span></div>
+                </div>
+                <div class="gauge-detail" id="cpuGaugeDetail">-- MHz</div>
+            </div>
+
+            <!-- CPU Temp Gauge -->
+            <div class="gauge-card" id="cpuTempGaugeCard">
+                <div class="gauge-header">
+                    <span class="gauge-icon">🌡️</span>
+                    <span class="gauge-title">CPU Temp</span>
+                </div>
+                <div class="gauge-ring-container">
+                    <svg class="gauge-ring" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"></circle>
+                        <circle class="gauge-fill temp-fill" id="cpuTempGaugeFill" cx="60" cy="60" r="52"></circle>
+                    </svg>
+                    <div class="gauge-value" id="cpuTempGaugeValue">0<span class="gauge-unit">°C</span></div>
+                </div>
+                <div class="gauge-detail" id="cpuTempDetail">Package</div>
+            </div>
+
+            <!-- GPU Gauge -->
+            <div class="gauge-card" id="gpuGaugeCard">
+                <div class="gauge-header">
+                    <span class="gauge-icon">🎮</span>
+                    <span class="gauge-title">GPU Usage</span>
+                </div>
+                <div class="gauge-ring-container">
+                    <svg class="gauge-ring" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"></circle>
+                        <circle class="gauge-fill gpu-fill" id="gpuGaugeFill" cx="60" cy="60" r="52"></circle>
+                    </svg>
+                    <div class="gauge-value" id="gpuGaugeValue">0<span class="gauge-unit">%</span></div>
+                </div>
+                <div class="gauge-detail" id="gpuGaugeDetail">-- °C | -- W</div>
+            </div>
+
+            <!-- RAM Gauge -->
+            <div class="gauge-card" id="ramGaugeCard">
+                <div class="gauge-header">
+                    <span class="gauge-icon">💾</span>
+                    <span class="gauge-title">RAM Usage</span>
+                </div>
+                <div class="gauge-ring-container">
+                    <svg class="gauge-ring" viewBox="0 0 120 120">
+                        <circle class="gauge-bg" cx="60" cy="60" r="52"></circle>
+                        <circle class="gauge-fill ram-fill" id="ramGaugeFill" cx="60" cy="60" r="52"></circle>
+                    </svg>
+                    <div class="gauge-value" id="ramGaugeValue">0<span class="gauge-unit">%</span></div>
+                </div>
+                <div class="gauge-detail" id="ramGaugeDetail">-- / -- GB</div>
+            </div>
+        </div>
+
+        <!-- Charts Grid -->
+        <div class="charts-grid">
+            <!-- CPU Usage Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3>CPU Utilization</h3>
+                    <span class="chart-badge" id="cpuChartBadge">Live</span>
+                </div>
+                <div class="chart-body">
+                    <canvas id="cpuChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Temperature Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3>Thermal Profile</h3>
+                    <span class="chart-badge" id="tempChartBadge">Live</span>
+                </div>
+                <div class="chart-body">
+                    <canvas id="tempChart"></canvas>
+                </div>
+            </div>
+
+            <!-- GPU Metrics Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3>GPU Metrics</h3>
+                    <span class="chart-badge" id="gpuChartBadge">Live</span>
+                </div>
+                <div class="chart-body">
+                    <canvas id="gpuChart"></canvas>
+                </div>
+            </div>
+
+            <!-- Frequency & Power Chart -->
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3>Frequency & Power</h3>
+                    <span class="chart-badge" id="freqChartBadge">Live</span>
+                </div>
+                <div class="chart-body">
+                    <canvas id="freqChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+                <div class="stat-label">Peak CPU Temp</div>
+                <div class="stat-value" id="statPeakCpuTemp">--°C</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Peak GPU Temp</div>
+                <div class="stat-value" id="statPeakGpuTemp">--°C</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Avg CPU Load</div>
+                <div class="stat-value" id="statAvgCpu">--%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Max GPU Power</div>
+                <div class="stat-value" id="statMaxGpuPower">--W</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">CPU Freq Range</div>
+                <div class="stat-value" id="statCpuFreqRange">--</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Throttle Events</div>
+                <div class="stat-value" id="statThrottleEvents">0</div>
+            </div>
+        </div>
+
+        <!-- Report Modal -->
+        <div class="modal-overlay" id="reportModal">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2>📊 Analysis Report</h2>
+                    <button class="modal-close" onclick="closeReport()">✕</button>
+                </div>
+                <pre class="report-text" id="reportText"></pre>
+            </div>
+        </div>
+    </div>
+
+    <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,7 @@
+numpy
+psutil
+matplotlib
+pynvml
+fastapi
+uvicorn[standard]
+websockets

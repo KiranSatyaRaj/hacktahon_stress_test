@@ -1,0 +1,162 @@
+# Project Structure Reference
+> **Last updated:** 2026-02-27 | Auto-updated as changes are made
+
+## Directory Layout
+
+```
+stress_test-main/
+├── run_stress.py                    ← CLI entry point
+├── requirements.txt                 ← pip dependencies
+├── output/                          ← generated at runtime
+│   ├── metrics.csv                  ← all snapshots (timestamp, CPU, RAM, GPU...)
+│   ├── stress_test.log              ← structured event log (NEW)
+│   └── analysis_report.txt          ← post-test analysis summary
+└── stress_challenge/
+    ├── __init__.py                  ← package marker
+    ├── config.py                    ← all constants / thresholds
+    ├── workloads.py                 ← CPU + GPU stress generators
+    ├── metrics.py                   ← data collection, console output, logging
+    ├── analyzer.py                  ← post-run statistical analysis
+    ├── main.py                      ← FastAPI server + orchestrator
+    └── dashboard/
+        ├── index.html               ← browser dashboard UI
+        ├── style.css                ← dashboard styles
+        └── app.js                   ← WebSocket client + live charts
+```
+
+---
+
+## File Details
+
+### [run_stress.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/run_stress.py)
+Thin launcher. Imports [main()](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/main.py#324-416) from `stress_challenge.main` and calls it.
+
+```
+python run_stress.py [--duration 120] [--log-interval 5] [--cpu-only] [--gpu-only] [--no-auto-start]
+```
+
+---
+
+### [config.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/config.py) — Constants
+| Constant | Default | Purpose |
+|---|---|---|
+| `DEFAULT_DURATION_SECONDS` | 3600 | 60-minute test |
+| `DEFAULT_SAMPLE_INTERVAL` | 2 s | Metrics collection frequency |
+| `LIVE_BROADCAST_INTERVAL` | 2 s | WebSocket push frequency |
+| `CPU_MATRIX_SIZE` | 1024 | NxN float64 matrix for CPU stress |
+| `CPU_WORKER_COUNT` | `cpu_count()` | One process per logical core |
+| `GPU_THROTTLE_TEMP_C` | 85 °C | Thermal threshold for warnings |
+| `CPU_THROTTLE_TEMP_C` | 95 °C | CPU thermal threshold |
+| `DEFAULT_OUTPUT_DIR` | `../output/` | CSV + report + log directory |
+
+---
+
+### [workloads.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/workloads.py) — Stress Generators
+
+#### [CPUWorkload](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/workloads.py#54-84)
+- Spawns **one `multiprocessing.Process` per CPU core** (bypasses GIL)
+- Each process runs: `numpy.dot(A, B)` → `sin(C)` → `cos(C)` in a tight loop
+- Matrix size: 1024×1024 float64 (~8 MB per matrix)
+- `.start()` / `.stop()` manage the process pool
+
+#### [GPUWorkload](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/workloads.py#249-347)
+Tries 4 strategies in order, uses first that succeeds:
+| Priority | Method | What it does |
+|---|---|---|
+| 1 ✅ | **PyTorch CUDA** | 4096×4096 float32 `torch.mm` in a tight loop with `cuda.synchronize()` |
+| 2 | Vulkan (vkcube) | 4 vkcube instances with PRIME offload |
+| 3 | OpenGL (glxgears) | 8 fullscreen glxgears with PRIME offload |
+| 4 | nvidia-smi | Clock boost + large numpy CPU matmul (minimal GPU stress) |
+
+> **On Windows with NVIDIA GPU + PyTorch CUDA installed → Strategy 1 (torch.mm) is used.**
+
+---
+
+### [metrics.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py) — Data Collection & Logging
+
+#### [MetricSnapshot](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#27-66) (dataclass)
+Single point-in-time reading:
+- `elapsed_seconds`, `timestamp`
+- **CPU:** `cpu_avg_percent`, `cpu_per_core[]`, `cpu_freq_current_mhz / max`
+- **RAM:** `ram_percent`, `ram_used_gb`, `ram_total_gb`
+- **CPU Thermals:** `cpu_temp_package`, `cpu_temp_cores[]` *(Linux only)*
+- **GPU (NVML):** `gpu_util_percent`, `gpu_temp_c`, `gpu_power_w`, `gpu_mem_used_mb / total`, `gpu_clock_sm_mhz`, `gpu_clock_mem_mhz`
+
+#### [MetricsCollector](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#68-248)
+- Background thread, wakes every `interval` seconds, appends a snapshot
+- CPU/RAM: **psutil** | GPU: **pynvml** (direct NVIDIA driver API) | CPU temps: `sensors` (Linux)
+- API: [get_latest()](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#107-110), [get_all_snapshots()](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#111-114), [save_csv()](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#115-132)
+
+#### [ConsoleLogger](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#250-348) *(added)*
+- Daemon thread, prints a bordered metric table to stdout every `log_interval` seconds (default 5 s)
+- Shows all CPU cores, freq, thermals, RAM, GPU block
+
+#### `EventLogger` *(added)*
+- Daemon thread monitoring threshold crossings every `interval` seconds
+- Logs to: stdout (one-liner) **and** `output/stress_test.log`
+- **Thresholds watched:**
+  - CPU avg > 80% → WARN, > 90% → CRITICAL
+  - GPU util > 80% → WARN, > 90% → CRITICAL
+  - GPU temp > 75°C → WARN, > `GPU_THROTTLE_TEMP_C` → CRITICAL
+  - RAM > 70% → WARN, > 85% → CRITICAL
+  - Thermal throttle recovery (metric drops back below threshold → INFO)
+
+---
+
+### [analyzer.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/analyzer.py) — Post-Test Analysis
+Runs after the test ends. Reads all [MetricSnapshot](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/metrics.py#27-66) objects and writes `output/analysis_report.txt`:
+- Peak / average CPU%, per-core breakdown
+- Peak / average GPU util, temp, power
+- RAM usage trend
+- Thermal throttle event detection
+
+---
+
+### [main.py](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/main.py) — FastAPI Orchestrator
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | Serve live dashboard HTML |
+| `/api/status` | GET | Test state, elapsed time, GPU method |
+| `/api/start` | POST | Start metrics + logger + workloads |
+| `/api/stop` | POST | Gracefully stop everything |
+| `/api/history` | GET | All snapshots for chart rendering |
+| `/api/report` | GET | Post-test analysis text |
+| `/ws` | WebSocket | Push latest snapshot every 2 s to browser |
+
+**State machines / key globals:**
+- `collector: MetricsCollector` — the data source
+- `console_logger: ConsoleLogger` — periodic terminal output
+- `event_logger: EventLogger` — threshold alarm logging *(NEW)*
+- `cpu_workload: CPUWorkload` — CPU stress processes
+- `gpu_workload: GPUWorkload` — GPU stress subprocess
+
+**Auto-start flow** (`--auto-start` default = True):
+```
+python run_stress.py
+  → uvicorn binds (~1 s)
+  → _cli_auto_start() thread wakes
+  → MetricsCollector.start()
+  → wait 2 s for first snapshot
+  → first immediate snapshot printed
+  → ConsoleLogger.start() + EventLogger.start()
+  → CPUWorkload.start() + GPUWorkload.start()
+  → _auto_stop_timer() starts countdown
+```
+
+---
+
+### [dashboard/](file:///c:/Users/pramo/Downloads/stress_test-main/stress_test-main/stress_challenge/main.py#68-73)
+Static browser UI served by FastAPI:
+- **`index.html`** — layout + chart containers
+- **`style.css`** — styling
+- **`app.js`** — WebSocket connection; receives JSON snapshots, updates live charts/gauges
+
+---
+
+### `output/` *(generated)*
+| File | Description |
+|---|---|
+| `metrics.csv` | All snapshots as CSV rows |
+| `stress_test.log` | Structured event log with timestamps and severity |
+| `analysis_report.txt` | Post-test statistical summary |

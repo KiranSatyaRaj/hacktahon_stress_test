@@ -156,6 +156,9 @@ try:
     N = (N // 64) * 64  # round to multiple of 64 for Tensor Core alignment
     N = max(N, 2048)
 
+    # Batch matmul sizing: B batches of MxK @ KxN, float16
+    B, M, K = 64, 1024, 1024
+
     print(
         f"GPU_BUDGET  vram={vram_bytes} budget={budget_bytes}"
         f" ({budget_bytes/1024**3:.2f} GB)  matrix_N={N}"
@@ -163,9 +166,6 @@ try:
         f" B={B} M={M} K={K}",
         flush=True,
     )
-
-    # Batch matmul sizing: B batches of MxK @ KxN, float16
-    B, M, K = 32, 1024, 1024
 
     # ── Allocate persistent buffers (avoid per-iteration alloc overhead) ─
     # Stream 0 & 1: large 2D FP16 GEMM → hammers Tensor Cores

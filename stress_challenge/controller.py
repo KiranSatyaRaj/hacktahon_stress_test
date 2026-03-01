@@ -190,8 +190,8 @@ class AdaptiveController:
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Add 2ms sleep per tick (cap 8ms)
-        new_sleep = min(self._cpu_sleep_ms + 2.0, 8.0)
+        # Add 3ms sleep per tick (cap 15ms)
+        new_sleep = min(self._cpu_sleep_ms + 3.0, 15.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
@@ -201,7 +201,7 @@ class AdaptiveController:
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Sleep first (cap 12ms), then gradual 1-worker reduction."""
+        """Level 2: Sleep first (cap 25ms), then gradual 1-worker reduction."""
         if self._cpu is None:
             return ""
         if self._target_workers == 0:
@@ -209,15 +209,15 @@ class AdaptiveController:
 
         actions = []
 
-        # Step 1: Increase sleep (3ms/tick, cap 12ms)
-        if self._cpu_sleep_ms < 12.0:
-            new_sleep = min(self._cpu_sleep_ms + 3.0, 12.0)
+        # Step 1: Increase sleep (5ms/tick, cap 25ms)
+        if self._cpu_sleep_ms < 25.0:
+            new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
             actions.append(f"sleep→{new_sleep:.0f}ms")
         else:
-            # Step 2: Sleep maxed → gradually reduce 1 worker (floor 65%)
-            min_workers = max(1, int(self._cpu.max_workers * 0.65))
+            # Step 2: Sleep maxed → gradually reduce 1 worker (floor 60%)
+            min_workers = max(1, int(self._cpu.max_workers * 0.60))
             if self._target_workers > min_workers:
                 self._target_workers -= 1
                 self._cpu.set_active_workers(self._target_workers)

@@ -182,7 +182,7 @@ class AdaptiveController:
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Moderate reduction — kill 25% workers + add 15ms sleep."""
+        """Level 1: Gentle reduction — kill 2 workers + add 5ms sleep per tick."""
         if self._cpu is None:
             return ""
 
@@ -192,17 +192,16 @@ class AdaptiveController:
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Reduce workers by 25% of max (floor at 40% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.40))
-        reduce_by = max(1, int(self._cpu.max_workers * 0.25))
-        new_target = max(min_workers, self._target_workers - reduce_by)
+        # Kill 2 workers per tick (floor at 60% of max)
+        min_workers = max(1, int(self._cpu.max_workers * 0.60))
+        new_target = max(min_workers, self._target_workers - 2)
         if new_target < self._target_workers:
             self._target_workers = new_target
             self._cpu.set_active_workers(new_target)
             actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
 
-        # Add 15ms sleep per tick (cap at 80ms)
-        new_sleep = min(self._cpu_sleep_ms + 15.0, 80.0)
+        # Add 5ms sleep per tick (cap at 25ms)
+        new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
@@ -216,7 +215,7 @@ class AdaptiveController:
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Aggressive — kill 40% workers + jump to 50ms sleep."""
+        """Level 2: Moderate reduction — kill 3 workers + add 10ms sleep per tick."""
         if self._cpu is None:
             return ""
 
@@ -226,17 +225,16 @@ class AdaptiveController:
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Reduce workers to 50% of max (floor at 30% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.30))
-        reduce_by = max(2, int(self._cpu.max_workers * 0.40))
-        new_target = max(min_workers, self._target_workers - reduce_by)
+        # Kill 3 workers per tick (floor at 50% of max)
+        min_workers = max(1, int(self._cpu.max_workers * 0.50))
+        new_target = max(min_workers, self._target_workers - 3)
         if new_target < self._target_workers:
             self._target_workers = new_target
             self._cpu.set_active_workers(new_target)
             actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
 
-        # Jump to at least 50ms sleep (cap at 120ms)
-        new_sleep = min(max(self._cpu_sleep_ms + 30.0, 50.0), 120.0)
+        # Add 10ms sleep per tick (cap at 40ms)
+        new_sleep = min(self._cpu_sleep_ms + 10.0, 40.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)

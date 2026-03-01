@@ -111,6 +111,43 @@ class CPUWorkload:
         return self._sleep_ms.value
 
     @property
+    def active_worker_count(self) -> int:
+        """Number of currently alive worker processes."""
+        return sum(1 for p in self._processes if p.is_alive())
+
+    @property
+    def max_workers(self) -> int:
+        return self.num_workers
+
+    def set_active_workers(self, n: int):
+        """Controller API: dynamically adjust the number of active workers.
+
+        If n < current alive count, terminate excess workers.
+        If n > current alive count (but <= max), spawn new ones.
+        """
+        n = max(1, min(n, self.num_workers))  # clamp to [1, max]
+        alive = [p for p in self._processes if p.is_alive()]
+        current = len(alive)
+
+        if n < current:
+            # Terminate excess workers (from the end)
+            to_kill = alive[n:]
+            for p in to_kill:
+                p.terminate()
+                p.join(timeout=3)
+        elif n > current:
+            # Spawn additional workers up to n
+            for i in range(current, n):
+                p = multiprocessing.Process(
+                    target=_cpu_worker,
+                    args=(self._stop_event, i, self._iteration_counter,
+                          self._sleep_ms, self._allowed_cores),
+                    daemon=True,
+                )
+                p.start()
+                self._processes.append(p)
+
+    @property
     def iteration_count(self) -> int:
         return self._iteration_counter.value
 

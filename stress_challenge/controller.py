@@ -57,6 +57,7 @@ class AdaptiveController:
 
         # Cumulative actions applied
         self._cpu_sleep_ms: float = 0.0
+        self._target_workers: int = 0        # 0 = not yet initialized
 
         # Decision log CSV
         os.makedirs(output_dir, exist_ok=True)
@@ -66,7 +67,7 @@ class AdaptiveController:
         self._csv_writer.writerow([
             "timestamp", "elapsed_s", "risk", "level",
             "cpu_temp", "gpu_power_w", "gpu_throttle", "cpu_gflops",
-            "action", "cpu_sleep_ms",
+            "action", "cpu_sleep_ms", "active_workers",
         ])
 
     # ── Public API ────────────────────────────────────────────────
@@ -181,48 +182,104 @@ class AdaptiveController:
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Gentle reduction — add micro-sleep to CPU workers."""
+        """Level 1: Moderate reduction — kill 25% workers + add 15ms sleep."""
         if self._cpu is None:
             return ""
 
-        # Add 3ms of sleep (cumulative)
-        new_sleep = min(self._cpu_sleep_ms + 3.0, 20.0)  # cap at 20ms
+        actions = []
+
+        # Initialize target workers on first call
+        if self._target_workers == 0:
+            self._target_workers = self._cpu.max_workers
+
+        # Reduce workers by 25% of max (floor at 40% of max)
+        min_workers = max(1, int(self._cpu.max_workers * 0.40))
+        reduce_by = max(1, int(self._cpu.max_workers * 0.25))
+        new_target = max(min_workers, self._target_workers - reduce_by)
+        if new_target < self._target_workers:
+            self._target_workers = new_target
+            self._cpu.set_active_workers(new_target)
+            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+
+        # Add 15ms sleep per tick (cap at 80ms)
+        new_sleep = min(self._cpu_sleep_ms + 15.0, 80.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            msg = f"⚠ WARNING — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → CPU sleep {new_sleep:.0f}ms"
+            actions.append(f"sleep→{new_sleep:.0f}ms")
+
+        if actions:
+            action_str = " + ".join(actions)
+            msg = f"⚠ WARNING — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            return f"cpu_sleep→{new_sleep:.0f}ms"
+            return action_str
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Aggressive — larger sleep increase."""
+        """Level 2: Aggressive — kill 40% workers + jump to 50ms sleep."""
         if self._cpu is None:
             return ""
 
-        # Jump to higher sleep
-        new_sleep = min(self._cpu_sleep_ms + 8.0, 30.0)  # cap at 30ms
+        actions = []
+
+        # Initialize target workers on first call
+        if self._target_workers == 0:
+            self._target_workers = self._cpu.max_workers
+
+        # Reduce workers to 50% of max (floor at 30% of max)
+        min_workers = max(1, int(self._cpu.max_workers * 0.30))
+        reduce_by = max(2, int(self._cpu.max_workers * 0.40))
+        new_target = max(min_workers, self._target_workers - reduce_by)
+        if new_target < self._target_workers:
+            self._target_workers = new_target
+            self._cpu.set_active_workers(new_target)
+            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+
+        # Jump to at least 50ms sleep (cap at 120ms)
+        new_sleep = min(max(self._cpu_sleep_ms + 30.0, 50.0), 120.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → CPU sleep {new_sleep:.0f}ms"
+            actions.append(f"sleep→{new_sleep:.0f}ms")
+
+        if actions:
+            action_str = " + ".join(actions)
+            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            return f"cpu_sleep→{new_sleep:.0f}ms"
+            return action_str
         return ""
 
     def _action_recover(self, snap: "MetricSnapshot") -> str:
-        """Level 0: Gradual recovery — reduce sleep when safe."""
+        """Level 0: Gradual recovery — bring workers back + reduce sleep."""
         if self._cpu is None:
             return ""
 
-        new_sleep = max(0.0, self._cpu_sleep_ms - 2.0)
-        if new_sleep != self._cpu_sleep_ms:
+        actions = []
+
+        # Initialize target workers on first call
+        if self._target_workers == 0:
+            self._target_workers = self._cpu.max_workers
+
+        # Bring back 2 workers at a time (up to max)
+        if self._target_workers < self._cpu.max_workers:
+            new_target = min(self._cpu.max_workers, self._target_workers + 2)
+            self._target_workers = new_target
+            self._cpu.set_active_workers(new_target)
+            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+
+        # Reduce sleep by 5ms at a time
+        if self._cpu_sleep_ms > 0:
+            new_sleep = max(0.0, self._cpu_sleep_ms - 5.0)
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            msg = f"✅ RECOVERY — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → CPU sleep {new_sleep:.0f}ms"
+            actions.append(f"sleep→{new_sleep:.0f}ms")
+
+        if actions:
+            action_str = " + ".join(actions)
+            msg = f"✅ RECOVERY — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
             self._safe_since = time.time()  # reset cooldown timer
-            return f"recover→sleep={new_sleep:.0f}ms"
+            return f"recover: {action_str}"
         return ""
 
     # ── Logging ───────────────────────────────────────────────────
@@ -230,6 +287,7 @@ class AdaptiveController:
     def _log_decision(self, snap: "MetricSnapshot", action: str):
         """Write decision to CSV."""
         try:
+            active = self._cpu.active_worker_count if self._cpu else 0
             self._csv_writer.writerow([
                 f"{snap.timestamp:.2f}",
                 f"{snap.elapsed_seconds}",
@@ -241,6 +299,7 @@ class AdaptiveController:
                 f"{snap.cpu_gflops:.2f}",
                 action or "hold",
                 f"{self._cpu_sleep_ms:.0f}",
+                f"{active}",
             ])
             self._csv_file.flush()
         except Exception:

@@ -184,14 +184,13 @@ class AdaptiveController:
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Gentle — small sleep increase only."""
+        """Level 1: Sleep-only — gentle braking."""
         if self._cpu is None:
             return ""
-
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Add 2ms per tick (cap at 15ms)
+        # Only tool: add 2ms sleep per tick (cap 15ms)
         new_sleep = min(self._cpu_sleep_ms + 2.0, 15.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
@@ -202,53 +201,62 @@ class AdaptiveController:
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Bigger sleep bump — no worker killing."""
+        """Level 2: Sleep first, then gradual worker reduction as last resort."""
         if self._cpu is None:
             return ""
-
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
-
-        # Add 5ms per tick (cap at 25ms)
-        new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
-        if new_sleep != self._cpu_sleep_ms:
-            self._cpu_sleep_ms = new_sleep
-            self._cpu.set_sleep_ms(new_sleep)
-            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → sleep→{new_sleep:.0f}ms"
-            print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            return f"sleep→{new_sleep:.0f}ms"
-        return ""
-
-    def _action_recover(self, snap: "MetricSnapshot") -> str:
-        """Level 0: Gradual recovery — bring workers back + reduce sleep."""
-        if self._cpu is None:
-            return ""
 
         actions = []
 
-        # Initialize target workers on first call
-        if self._target_workers == 0:
-            self._target_workers = self._cpu.max_workers
-
-        # Bring back 2 workers at a time (up to max)
-        if self._target_workers < self._cpu.max_workers:
-            new_target = min(self._cpu.max_workers, self._target_workers + 2)
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
-
-        # Reduce sleep by 5ms at a time
-        if self._cpu_sleep_ms > 0:
-            new_sleep = max(0.0, self._cpu_sleep_ms - 5.0)
+        # Step 1: Increase sleep (5ms/tick, cap 25ms)
+        if self._cpu_sleep_ms < 25.0:
+            new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
             actions.append(f"sleep→{new_sleep:.0f}ms")
+        else:
+            # Step 2: Sleep is maxed — NOW reduce 1 worker as last resort
+            min_workers = max(1, int(self._cpu.max_workers * 0.75))  # floor 75%
+            if self._target_workers > min_workers:
+                self._target_workers -= 1
+                self._cpu.set_active_workers(self._target_workers)
+                actions.append(f"workers→{self._target_workers}/{self._cpu.max_workers}")
+
+        if actions:
+            action_str = " + ".join(actions)
+            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
+            print(f"    🔧 CONTROLLER: {msg}", flush=True)
+            return action_str
+        return ""
+
+    def _action_recover(self, snap: "MetricSnapshot") -> str:
+        """Level 0: Gradual recovery — reduce sleep first, then restore workers."""
+        if self._cpu is None:
+            return ""
+        if self._target_workers == 0:
+            self._target_workers = self._cpu.max_workers
+
+        actions = []
+
+        # Step 1: Reduce sleep first (2ms at a time back to 0)
+        if self._cpu_sleep_ms > 0:
+            new_sleep = max(0.0, self._cpu_sleep_ms - 2.0)
+            self._cpu_sleep_ms = new_sleep
+            self._cpu.set_sleep_ms(new_sleep)
+            actions.append(f"sleep→{new_sleep:.0f}ms")
+        else:
+            # Step 2: Sleep is zero — NOW bring back 1 worker at a time
+            if self._target_workers < self._cpu.max_workers:
+                self._target_workers += 1
+                self._cpu.set_active_workers(self._target_workers)
+                actions.append(f"workers→{self._target_workers}/{self._cpu.max_workers}")
 
         if actions:
             action_str = " + ".join(actions)
             msg = f"✅ RECOVERY — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            self._safe_since = time.time()  # reset cooldown timer
+            self._safe_since = time.time()
             return f"recover: {action_str}"
         return ""
 

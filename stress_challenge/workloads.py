@@ -290,6 +290,9 @@ try:
     t_start = time.time()
     t_last_report = t_start
 
+    # GPU sleep control file (written by controller, polled here)
+    gpu_ctrl_file = os.environ.get("GPU_CTRL_FILE", "")
+
     while keep_running:
         # Stream 0: FP16 GEMM A → hammers Tensor Cores
         with torch.cuda.stream(streams[0]):
@@ -313,6 +316,16 @@ try:
         # Sync once per iteration to keep all streams coordinated
         torch.cuda.synchronize()
         iters += 1
+
+        # Controller-injected GPU sleep (poll control file)
+        if gpu_ctrl_file:
+            try:
+                with open(gpu_ctrl_file, 'r') as cf:
+                    gpu_sleep = float(cf.read().strip())
+                if gpu_sleep > 0:
+                    time.sleep(gpu_sleep / 1000.0)
+            except:
+                pass
 
         # Report throughput + CUDA memory every ~2 seconds
         now = time.time()
@@ -488,6 +501,11 @@ class GPUWorkload:
         self._cuda_alloc: int = 0       # bytes actively allocated
         self._cuda_reserved: int = 0    # bytes reserved by caching allocator
         self._cuda_frag: int = 0        # reserved - allocated = waste
+        # GPU sleep control file (polled by subprocess)
+        self._gpu_ctrl_file = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "output", ".gpu_ctrl"
+        )
+        self._gpu_sleep_ms: float = 0.0
 
     @property
     def method(self) -> str:
@@ -532,6 +550,11 @@ class GPUWorkload:
         self._gpu_iter_rate = 0.0
         self._last_iters = 0
         self._last_iter_ts = 0.0
+        self._gpu_sleep_ms = 0.0
+        # Write initial 0 to control file
+        os.makedirs(os.path.dirname(self._gpu_ctrl_file), exist_ok=True)
+        with open(self._gpu_ctrl_file, 'w') as f:
+            f.write("0")
         self._thread = threading.Thread(target=self._run_stress_chain, daemon=True)
         self._thread.start()
 
@@ -547,12 +570,30 @@ class GPUWorkload:
             self._stdout_reader.join(timeout=5)
         if self._thread:
             self._thread.join(timeout=15)
+        # Clean up control file
+        try:
+            os.remove(self._gpu_ctrl_file)
+        except OSError:
+            pass
         # Reset GPU clocks
         try:
             subprocess.run(["nvidia-smi", "-rgc"], capture_output=True, timeout=5)
             subprocess.run(["nvidia-smi", "-rmc"], capture_output=True, timeout=5)
         except Exception:
             pass
+
+    def set_sleep_ms(self, ms: float):
+        """Controller API: inject sleep into GPU subprocess via control file."""
+        self._gpu_sleep_ms = ms
+        try:
+            with open(self._gpu_ctrl_file, 'w') as f:
+                f.write(str(ms))
+        except OSError:
+            pass
+
+    @property
+    def current_sleep_ms(self) -> float:
+        return self._gpu_sleep_ms
 
     def _read_subprocess_stdout(self):
         """
@@ -685,12 +726,13 @@ class GPUWorkload:
             interpreter = torch_python if name == "torch_cuda" else python_path
 
             try:
-                # Build env with optional core pinning
+                # Build env with optional core pinning + GPU control file
                 env = os.environ.copy()
                 if self._combined_mode:
                     env["GPU_PIN_CORES"] = ",".join(
                         str(c) for c in config.GPU_RESERVED_CORES
                     )
+                env["GPU_CTRL_FILE"] = self._gpu_ctrl_file
 
                 self._subprocess = subprocess.Popen(
                     [interpreter, "-c", script],

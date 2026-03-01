@@ -173,10 +173,10 @@ class AdaptiveController:
             degrad_risk = 0
 
         return (
-            0.4 * temp_risk +
-            0.3 * power_risk +
-            0.2 * throttle_risk +
-            0.1 * degrad_risk
+            0.60 * temp_risk +
+            0.20 * power_risk +
+            0.10 * throttle_risk +
+            0.10 * degrad_risk
         )
 
     # ── Healing Actions ───────────────────────────────────────────

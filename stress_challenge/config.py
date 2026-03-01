@@ -37,8 +37,8 @@ GPU_WARNING_TEMP = 78
 CONTROLLER_TICK_INTERVAL = 5          # seconds between controller evaluations
 RECOVERY_COOLDOWN_SECS = 30           # wait this long in SAFE before recovering
 # Risk thresholds
-RISK_WARNING = 0.55
-RISK_CRITICAL = 0.70
+RISK_WARNING = 0.50
+RISK_CRITICAL = 0.65
 
 # ── Output ───────────────────────────────────────────────────────────
 DEFAULT_OUTPUT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")

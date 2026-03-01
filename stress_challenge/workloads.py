@@ -122,7 +122,8 @@ class CPUWorkload:
     def set_active_workers(self, n: int):
         """Controller API: dynamically adjust the number of active workers.
 
-        If n < current alive count, terminate excess workers.
+        If n < current alive count, kill excess workers (SIGKILL — BLAS
+        blocks SIGTERM so terminate() doesn't work on numpy workers).
         If n > current alive count (but <= max), spawn new ones.
         """
         n = max(1, min(n, self.num_workers))  # clamp to [1, max]
@@ -130,11 +131,13 @@ class CPUWorkload:
         current = len(alive)
 
         if n < current:
-            # Terminate excess workers (from the end)
+            # Kill excess workers (from the end)
             to_kill = alive[n:]
             for p in to_kill:
-                p.terminate()
-                p.join(timeout=3)
+                p.kill()            # SIGKILL — guaranteed death
+                p.join(timeout=2)
+            # Clean dead processes from the list
+            self._processes = [p for p in self._processes if p.is_alive()]
         elif n > current:
             # Spawn additional workers up to n
             for i in range(current, n):

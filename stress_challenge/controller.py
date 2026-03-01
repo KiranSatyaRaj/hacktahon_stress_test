@@ -161,9 +161,11 @@ class AdaptiveController:
         else:
             power_risk = 0
 
-        # Component 3: GPU throttle active (20%) — binary
+        # Component 3: GPU throttle active (10%) — only count THERMAL throttle
+        # SwPowerCap is normal on laptops and should NOT inflate the risk score
         throttle = snap.gpu_throttle_reasons or ""
-        throttle_risk = 1.0 if (throttle and throttle != "none") else 0.0
+        thermal_throttles = ("HwThermalSlowdown", "SwThermalSlowdown", "HwSlowdown")
+        throttle_risk = 1.0 if any(t in throttle for t in thermal_throttles) else 0.0
 
         # Component 4: Throughput degradation (10%)
         if self._peak_gflops > 0 and snap.cpu_gflops > 0:
@@ -173,40 +175,35 @@ class AdaptiveController:
             degrad_risk = 0
 
         return (
-            0.4 * temp_risk +
-            0.3 * power_risk +
-            0.2 * throttle_risk +
-            0.1 * degrad_risk
+            0.60 * temp_risk +
+            0.20 * power_risk +
+            0.10 * throttle_risk +
+            0.10 * degrad_risk
         )
 
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Moderate reduction — kill 25% workers + add 15ms sleep."""
+        """Level 1: Sleep injection — CPU + GPU."""
         if self._cpu is None:
             return ""
-
-        actions = []
-
-        # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Reduce workers by 25% of max (floor at 40% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.40))
-        reduce_by = max(1, int(self._cpu.max_workers * 0.25))
-        new_target = max(min_workers, self._target_workers - reduce_by)
-        if new_target < self._target_workers:
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+        actions = []
 
-        # Add 15ms sleep per tick (cap at 80ms)
-        new_sleep = min(self._cpu_sleep_ms + 15.0, 80.0)
+        # CPU: add 5ms sleep per tick (cap 50ms)
+        new_sleep = min(self._cpu_sleep_ms + 5.0, 50.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            actions.append(f"sleep→{new_sleep:.0f}ms")
+            actions.append(f"cpu_sleep→{new_sleep:.0f}ms")
+
+        # GPU: proportional sleep (half of CPU sleep)
+        if self._gpu:
+            gpu_sleep = self._cpu_sleep_ms * 0.5
+            self._gpu.set_sleep_ms(gpu_sleep)
+            actions.append(f"gpu_sleep→{gpu_sleep:.0f}ms")
 
         if actions:
             action_str = " + ".join(actions)
@@ -216,31 +213,33 @@ class AdaptiveController:
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Aggressive — kill 40% workers + jump to 50ms sleep."""
+        """Level 2: Bigger sleep + gradual worker reduction as last resort."""
         if self._cpu is None:
             return ""
-
-        actions = []
-
-        # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Reduce workers to 50% of max (floor at 30% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.30))
-        reduce_by = max(2, int(self._cpu.max_workers * 0.40))
-        new_target = max(min_workers, self._target_workers - reduce_by)
-        if new_target < self._target_workers:
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+        actions = []
 
-        # Jump to at least 50ms sleep (cap at 120ms)
-        new_sleep = min(max(self._cpu_sleep_ms + 30.0, 50.0), 120.0)
-        if new_sleep != self._cpu_sleep_ms:
+        # Step 1: CPU sleep (10ms/tick, cap 80ms)
+        if self._cpu_sleep_ms < 80.0:
+            new_sleep = min(self._cpu_sleep_ms + 10.0, 80.0)
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            actions.append(f"sleep→{new_sleep:.0f}ms")
+            actions.append(f"cpu_sleep→{new_sleep:.0f}ms")
+        else:
+            # Step 2: Sleep maxed → gradually reduce 1 worker (floor 60%)
+            min_workers = max(1, int(self._cpu.max_workers * 0.60))
+            if self._target_workers > min_workers:
+                self._target_workers -= 1
+                self._cpu.set_active_workers(self._target_workers)
+                actions.append(f"workers→{self._target_workers}/{self._cpu.max_workers}")
+
+        # GPU: proportional sleep (half of CPU sleep)
+        if self._gpu:
+            gpu_sleep = self._cpu_sleep_ms * 0.5
+            self._gpu.set_sleep_ms(gpu_sleep)
+            actions.append(f"gpu_sleep→{gpu_sleep:.0f}ms")
 
         if actions:
             action_str = " + ".join(actions)
@@ -250,35 +249,40 @@ class AdaptiveController:
         return ""
 
     def _action_recover(self, snap: "MetricSnapshot") -> str:
-        """Level 0: Gradual recovery — bring workers back + reduce sleep."""
+        """Level 0: Reduce sleep first (CPU + GPU), then restore workers."""
         if self._cpu is None:
             return ""
-
-        actions = []
-
-        # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Bring back 2 workers at a time (up to max)
-        if self._target_workers < self._cpu.max_workers:
-            new_target = min(self._cpu.max_workers, self._target_workers + 2)
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
+        actions = []
 
-        # Reduce sleep by 5ms at a time
+        # Step 1: Reduce CPU sleep (5ms/tick down to 0)
         if self._cpu_sleep_ms > 0:
             new_sleep = max(0.0, self._cpu_sleep_ms - 5.0)
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            actions.append(f"sleep→{new_sleep:.0f}ms")
+            actions.append(f"cpu_sleep→{new_sleep:.0f}ms")
+            # GPU sleep follows proportionally
+            if self._gpu:
+                gpu_sleep = new_sleep * 0.5
+                self._gpu.set_sleep_ms(gpu_sleep)
+                actions.append(f"gpu_sleep→{gpu_sleep:.0f}ms")
+        else:
+            # Step 2: Sleep is zero → bring back 1 worker at a time
+            if self._target_workers < self._cpu.max_workers:
+                self._target_workers += 1
+                self._cpu.set_active_workers(self._target_workers)
+                actions.append(f"workers→{self._target_workers}/{self._cpu.max_workers}")
+            # Also clear GPU sleep
+            if self._gpu:
+                self._gpu.set_sleep_ms(0)
 
         if actions:
             action_str = " + ".join(actions)
             msg = f"✅ RECOVERY — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            self._safe_since = time.time()  # reset cooldown timer
+            self._safe_since = time.time()
             return f"recover: {action_str}"
         return ""
 

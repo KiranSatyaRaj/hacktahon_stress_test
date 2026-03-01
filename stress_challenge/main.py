@@ -199,6 +199,127 @@ async def get_history():
     return {"snapshots": [s.to_dict() for s in snapshots]}
 
 
+@app.get("/compare", response_class=HTMLResponse)
+async def serve_compare():
+    html_path = os.path.join(DASHBOARD_DIR, "compare.html")
+    with open(html_path, "r") as f:
+        return HTMLResponse(content=f.read())
+
+
+@app.get("/api/compare")
+async def get_compare():
+    """Read baseline + controlled CSVs and return comparison data."""
+    import csv as csv_mod
+    import statistics
+
+    base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "output")
+    baseline_csv = os.path.join(base_dir, "baseline", config.CSV_FILENAME)
+    controlled_csv = os.path.join(base_dir, "controlled", config.CSV_FILENAME)
+
+    if not os.path.exists(baseline_csv):
+        return {"error": f"Baseline CSV not found at {baseline_csv}. Run without --controller first."}
+    if not os.path.exists(controlled_csv):
+        return {"error": f"Controlled CSV not found at {controlled_csv}. Run with --controller first."}
+
+    def parse_csv(path):
+        rows = []
+        with open(path, "r") as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                rows.append(row)
+        return rows
+
+    def extract_series(rows):
+        elapsed = []
+        cpu_temp = []
+        cpu_gflops = []
+        gpu_power = []
+        gpu_tflops = []
+        for r in rows:
+            try:
+                elapsed.append(float(r.get("elapsed_seconds", 0)))
+                cpu_temp.append(float(r.get("cpu_temp_package", 0)))
+                cpu_gflops.append(float(r.get("cpu_gflops", 0)))
+                gpu_power.append(float(r.get("gpu_power_w", 0)))
+                gpu_tflops.append(float(r.get("gpu_tflops", 0)))
+            except (ValueError, TypeError):
+                continue
+        return {
+            "elapsed": elapsed,
+            "cpu_temp": cpu_temp,
+            "cpu_gflops": cpu_gflops,
+            "gpu_power": gpu_power,
+            "gpu_tflops": gpu_tflops,
+        }
+
+    def compute_stats(series):
+        gflops = [v for v in series["cpu_gflops"] if v > 0]
+        tflops = [v for v in series["gpu_tflops"] if v > 0]
+        temps = [v for v in series["cpu_temp"] if v > 0]
+
+        avg_gflops = statistics.mean(gflops) if gflops else 0
+        cov_gflops = (statistics.stdev(gflops) / avg_gflops * 100) if len(gflops) > 1 and avg_gflops > 0 else 0
+        peak_temp = max(temps) if temps else 0
+        avg_temp = statistics.mean(temps) if temps else 0
+        avg_tflops = statistics.mean(tflops) if tflops else 0
+
+        # Degradation: (peak - last_10%) / peak
+        if gflops:
+            tail = gflops[-max(1, len(gflops)//10):]
+            degradation = max(0, (max(gflops) - statistics.mean(tail)) / max(gflops) * 100)
+        else:
+            degradation = 0
+
+        return {
+            "avg_gflops": round(avg_gflops, 2),
+            "cov_gflops": round(cov_gflops, 2),
+            "peak_temp": round(peak_temp, 1),
+            "avg_temp": round(avg_temp, 1),
+            "degradation": round(degradation, 2),
+            "avg_tflops": round(avg_tflops, 3),
+        }
+
+    b_rows = parse_csv(baseline_csv)
+    c_rows = parse_csv(controlled_csv)
+    b_series = extract_series(b_rows)
+    c_series = extract_series(c_rows)
+    b_stats = compute_stats(b_series)
+    c_stats = compute_stats(c_series)
+
+    # Controller decisions (from controlled dir)
+    ctrl_data = {"elapsed": [], "workers": [], "sleep_ms": []}
+    ctrl_csv = os.path.join(base_dir, "controlled", "controller_decisions.csv")
+    if os.path.exists(ctrl_csv):
+        ctrl_rows = parse_csv(ctrl_csv)
+        for r in ctrl_rows:
+            try:
+                ctrl_data["elapsed"].append(float(r.get("elapsed_s", 0)))
+                ctrl_data["workers"].append(int(r.get("active_workers", 0)))
+                ctrl_data["sleep_ms"].append(float(r.get("cpu_sleep_ms", 0)))
+            except (ValueError, TypeError):
+                continue
+
+    return {
+        "baseline": b_series,
+        "controlled": c_series,
+        "controller": ctrl_data,
+        "summary": {
+            "b_avg_gflops": b_stats["avg_gflops"],
+            "c_avg_gflops": c_stats["avg_gflops"],
+            "b_cov_gflops": b_stats["cov_gflops"],
+            "c_cov_gflops": c_stats["cov_gflops"],
+            "b_peak_temp": b_stats["peak_temp"],
+            "c_peak_temp": c_stats["peak_temp"],
+            "b_avg_temp": b_stats["avg_temp"],
+            "c_avg_temp": c_stats["avg_temp"],
+            "b_degradation": b_stats["degradation"],
+            "c_degradation": c_stats["degradation"],
+            "b_avg_tflops": b_stats["avg_tflops"],
+            "c_avg_tflops": c_stats["avg_tflops"],
+        },
+    }
+
+
 # ── WebSocket ────────────────────────────────────────────────────────
 
 @app.websocket("/ws")

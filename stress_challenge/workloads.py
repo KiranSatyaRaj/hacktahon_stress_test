@@ -252,7 +252,7 @@ try:
     N = max(N, 2048)
 
     # Batch matmul sizing: B batches of MxK @ KxN, float16
-    B, M, K = 64, 1024, 1024
+    B, M, K = 128, 1024, 1024
 
     print(
         f"GPU_BUDGET  vram={vram_bytes} budget={budget_bytes}"

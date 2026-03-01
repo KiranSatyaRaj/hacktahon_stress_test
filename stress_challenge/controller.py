@@ -161,9 +161,11 @@ class AdaptiveController:
         else:
             power_risk = 0
 
-        # Component 3: GPU throttle active (20%) — binary
+        # Component 3: GPU throttle active (10%) — only count THERMAL throttle
+        # SwPowerCap is normal on laptops and should NOT inflate the risk score
         throttle = snap.gpu_throttle_reasons or ""
-        throttle_risk = 1.0 if (throttle and throttle != "none") else 0.0
+        thermal_throttles = ("HwThermalSlowdown", "SwThermalSlowdown", "HwSlowdown")
+        throttle_risk = 1.0 if any(t in throttle for t in thermal_throttles) else 0.0
 
         # Component 4: Throughput degradation (10%)
         if self._peak_gflops > 0 and snap.cpu_gflops > 0:
@@ -182,16 +184,15 @@ class AdaptiveController:
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Gentle — sleep only, no worker killing."""
+        """Level 1: Gentle — small sleep increase only."""
         if self._cpu is None:
             return ""
 
-        # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Sleep only: add 3ms per tick (cap at 20ms)
-        new_sleep = min(self._cpu_sleep_ms + 3.0, 20.0)
+        # Add 2ms per tick (cap at 15ms)
+        new_sleep = min(self._cpu_sleep_ms + 2.0, 15.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
@@ -201,36 +202,21 @@ class AdaptiveController:
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Moderate — kill 1 worker per tick + small sleep bump."""
+        """Level 2: Bigger sleep bump — no worker killing."""
         if self._cpu is None:
             return ""
 
-        actions = []
-
-        # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Kill only 1 worker per tick (floor at 75% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.75))
-        new_target = max(min_workers, self._target_workers - 1)
-        if new_target < self._target_workers:
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
-
-        # Add 5ms sleep per tick (cap at 30ms)
-        new_sleep = min(self._cpu_sleep_ms + 5.0, 30.0)
+        # Add 5ms per tick (cap at 25ms)
+        new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            actions.append(f"sleep→{new_sleep:.0f}ms")
-
-        if actions:
-            action_str = " + ".join(actions)
-            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
+            msg = f"🚨 CRITICAL — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → sleep→{new_sleep:.0f}ms"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            return action_str
+            return f"sleep→{new_sleep:.0f}ms"
         return ""
 
     def _action_recover(self, snap: "MetricSnapshot") -> str:

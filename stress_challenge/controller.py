@@ -182,40 +182,26 @@ class AdaptiveController:
     # ── Healing Actions ───────────────────────────────────────────
 
     def _action_warning(self, snap: "MetricSnapshot") -> str:
-        """Level 1: Gentle reduction — kill 2 workers + add 5ms sleep per tick."""
+        """Level 1: Gentle — sleep only, no worker killing."""
         if self._cpu is None:
             return ""
-
-        actions = []
 
         # Initialize target workers on first call
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Kill 2 workers per tick (floor at 60% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.60))
-        new_target = max(min_workers, self._target_workers - 2)
-        if new_target < self._target_workers:
-            self._target_workers = new_target
-            self._cpu.set_active_workers(new_target)
-            actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
-
-        # Add 5ms sleep per tick (cap at 25ms)
-        new_sleep = min(self._cpu_sleep_ms + 5.0, 25.0)
+        # Sleep only: add 3ms per tick (cap at 20ms)
+        new_sleep = min(self._cpu_sleep_ms + 3.0, 20.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
-            actions.append(f"sleep→{new_sleep:.0f}ms")
-
-        if actions:
-            action_str = " + ".join(actions)
-            msg = f"⚠ WARNING — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → {action_str}"
+            msg = f"⚠ WARNING — risk {self._risk:.2f} | CPU {snap.cpu_temp_package:.0f}°C → sleep→{new_sleep:.0f}ms"
             print(f"    🔧 CONTROLLER: {msg}", flush=True)
-            return action_str
+            return f"sleep→{new_sleep:.0f}ms"
         return ""
 
     def _action_critical(self, snap: "MetricSnapshot") -> str:
-        """Level 2: Moderate reduction — kill 3 workers + add 10ms sleep per tick."""
+        """Level 2: Moderate — kill 1 worker per tick + small sleep bump."""
         if self._cpu is None:
             return ""
 
@@ -225,16 +211,16 @@ class AdaptiveController:
         if self._target_workers == 0:
             self._target_workers = self._cpu.max_workers
 
-        # Kill 3 workers per tick (floor at 50% of max)
-        min_workers = max(1, int(self._cpu.max_workers * 0.50))
-        new_target = max(min_workers, self._target_workers - 3)
+        # Kill only 1 worker per tick (floor at 75% of max)
+        min_workers = max(1, int(self._cpu.max_workers * 0.75))
+        new_target = max(min_workers, self._target_workers - 1)
         if new_target < self._target_workers:
             self._target_workers = new_target
             self._cpu.set_active_workers(new_target)
             actions.append(f"workers→{new_target}/{self._cpu.max_workers}")
 
-        # Add 10ms sleep per tick (cap at 40ms)
-        new_sleep = min(self._cpu_sleep_ms + 10.0, 40.0)
+        # Add 5ms sleep per tick (cap at 30ms)
+        new_sleep = min(self._cpu_sleep_ms + 5.0, 30.0)
         if new_sleep != self._cpu_sleep_ms:
             self._cpu_sleep_ms = new_sleep
             self._cpu.set_sleep_ms(new_sleep)
